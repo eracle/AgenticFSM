@@ -27,12 +27,12 @@ def settings_module(monkeypatch):
 
 def test_a_setting_defaults_to_global_settings(settings):
     assert settings.BACKEND is global_settings.BACKEND is None
-    assert settings.ASK_MODEL == global_settings.ASK_MODEL == "anthropic:claude-haiku-5-5"
+    assert settings.DECIDE_MODEL == global_settings.DECIDE_MODEL == "anthropic:claude-haiku-5-5"
 
 
 def test_a_settings_module_changes_only_what_it_names(settings, settings_module):
     assert settings.BACKEND == "from.the.module"
-    assert settings.ASK_MODEL == global_settings.ASK_MODEL
+    assert settings.DECIDE_MODEL == global_settings.DECIDE_MODEL
 
 
 def test_the_environment_wins_over_the_settings_module(settings, settings_module, monkeypatch):

@@ -1,16 +1,16 @@
-"""Steps a model or an agent decides: ``Decision`` and ``Ask``.
+"""Steps a model or an agent decides: ``Decision`` and ``Decide``.
 
     class MessageRead(Decision):
         to: Order
         reason: str
 
-    read_message = Ask(
+    read_message = Decide(
         name="read_message",
         prompt=lambda order: order.message and f"Where does this message put the order?\\n{order.message}",
         schema=MessageRead,
     )
 
-An ``Ask`` sits on transition rows like a function step. When it runs, the model is offered only
+A ``Decide`` sits on transition rows like a function step. When it runs, the model is offered only
 the targets of its rows out of the entity's state, each with its description. A session can stand
 in for the model: ``machine.brief(...)`` gives it what the model would get, and
 ``machine.fire(..., answer=...)`` applies what it decided.
@@ -39,7 +39,7 @@ class Decision(BaseModel):
 
 @dataclass(frozen=True)
 class Brief:
-    """Everything a session needs to decide an ``Ask`` in the model's place."""
+    """Everything a session needs to decide a ``Decide`` step in the model's place."""
 
     step: str
     instructions: list[str]
@@ -49,13 +49,13 @@ class Brief:
     tools: list[tuple[str, str]]  # (name, description) of the agent's own tools
 
 
-class Ask:
+class Decide:
     """A step decided by a Pydantic AI ``Agent``.
 
     ``prompt`` is a function of the entity; a falsy return means "not now" and no call is made.
     ``agent`` holds the whole model-side definition, and its output type must subclass
     ``Decision``. Without it, ``schema`` (default: a bare ``Decision``) is put to the
-    ``ASK_MODEL`` setting's model.
+    ``DECIDE_MODEL`` setting's model.
     """
 
     def __init__(
@@ -67,13 +67,13 @@ class Ask:
         schema: type[Decision] | None = None,
     ):
         if not isinstance(name, str) or not name:
-            raise TypeError(f"an Ask needs a name, got {name!r}")
+            raise TypeError(f"a Decide needs a name, got {name!r}")
         if not callable(prompt):
             raise TypeError(f"{name}: prompt= must be a function of the entity")
         if agent is not None and schema is not None:
             raise TypeError(f"{name}: pass agent= or schema=, not both; an agent's output type is its schema")
         if agent is None:
-            agent = Agent(settings.ASK_MODEL, output_type=schema or Decision, defer_model_check=True)
+            agent = Agent(settings.DECIDE_MODEL, output_type=schema or Decision, defer_model_check=True)
         if not _is_decision_type(agent.output_type):
             raise TypeError(f"{name}: the output type {agent.output_type!r} must subclass Decision")
         self.name = name
@@ -83,7 +83,7 @@ class Ask:
         self._narrowed: dict[tuple[States, ...], type[Decision]] = {}
 
     def __repr__(self) -> str:
-        return f"Ask({self.name!r})"
+        return f"Decide({self.name!r})"
 
     @property
     def states(self) -> type[States]:

@@ -6,13 +6,13 @@ import pytest
 from pydantic_ai import Agent, models
 from pydantic_ai.models.test import TestModel
 
-from agentic_fsm import Ask, Machine
+from agentic_fsm import Decide, Machine
 from agentic_fsm.cli import EXIT_ERROR, EXIT_OK, EXIT_REFUSED, main, mermaid
 
 from . import machines
 from .conftest import new_order
-from .test_ask import MessageRead, machine_with, message_prompt
-from .test_ask import new_order as new_message_order
+from .test_decide import MessageRead, machine_with, message_prompt
+from .test_decide import new_order as new_message_order
 
 models.ALLOW_MODEL_REQUESTS = False
 
@@ -28,9 +28,9 @@ def cli_orders(monkeypatch, orders):
 
 @pytest.fixture
 def cli_messages(monkeypatch, backend, table):
-    """The message machine with the default Ask: no agent of its own and no model key."""
+    """The message machine with the default Decide: no agent of its own and no model key."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    read_message = Ask(name="read_message", prompt=message_prompt, schema=MessageRead)
+    read_message = Decide(name="read_message", prompt=message_prompt, schema=MessageRead)
     machine = machine_with(backend, table, read_message)
     monkeypatch.setattr(machines, "messages", machine)
     return machine
@@ -233,13 +233,13 @@ def test_advance_exits_non_zero_when_a_move_is_refused(capsys, backend, table, m
     assert "may move paid only to shipped" in out
 
 
-# ── An Ask at the CLI ──
+# ── A Decide at the CLI ──
 
 
-def test_an_ask_fires_from_the_cli_as_from_python(capsys, monkeypatch, backend, table):
+def test_a_decide_fires_from_the_cli_as_from_python(capsys, monkeypatch, backend, table):
     model = TestModel(custom_output_args={"to": "confirmed", "reason": "They said yes"})
     agent = Agent(model, output_type=MessageRead)
-    machine = machine_with(backend, table, Ask(name="read_message", prompt=message_prompt, agent=agent))
+    machine = machine_with(backend, table, Decide(name="read_message", prompt=message_prompt, agent=agent))
     monkeypatch.setattr(machines, "messages", machine)
     table["7"] = new_message_order(message="Yes, please send it")
     machine.start(7)
@@ -251,7 +251,7 @@ def test_an_ask_fires_from_the_cli_as_from_python(capsys, monkeypatch, backend, 
     ]
 
 
-def test_agent_then_answer_finishes_an_ask_with_no_model_key(capsys, cli_messages, table):
+def test_agent_then_answer_finishes_a_decide_with_no_model_key(capsys, cli_messages, table):
     table["7"] = new_message_order(message="Please cancel it")
     cli_messages.start(7)
 
@@ -300,7 +300,7 @@ def test_agent_on_a_code_step_is_an_error(capsys, cli_orders, table):
     cli_orders.start(42)
     code, _, err = run(capsys, *ORDERS, "fire", "order:42", "payment_cleared", "--agent")
     assert code == EXIT_ERROR
-    assert "is code, not an Ask" in err
+    assert "is code, not a Decide" in err
 
 
 def test_agent_and_answer_are_not_given_together(capsys, cli_messages):

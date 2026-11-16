@@ -7,5 +7,5 @@ BACKEND = None
 # The machine `agfsm` loads when it's given no --machine: "package.module:name".
 MACHINE = None
 
-# The model an Ask with no agent= of its own puts its schema to, as Pydantic AI names models.
-ASK_MODEL = "anthropic:claude-haiku-5-5"
+# The model a Decide with no agent= of its own puts its schema to, as Pydantic AI names models.
+DECIDE_MODEL = "anthropic:claude-haiku-5-5"

@@ -1,4 +1,4 @@
-"""``Ask`` steps: a model decides, or a session answers in its place. No test calls a real model."""
+"""``Decide`` steps: a model decides, or a session answers in its place. No test calls a real model."""
 
 from types import SimpleNamespace
 
@@ -8,7 +8,7 @@ from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.models.test import TestModel
 
 from agentic_fsm import (
-    Ask,
+    Decide,
     Decision,
     FinalState,
     InitialState,
@@ -51,9 +51,9 @@ def model_saying(**fields) -> TestModel:
     return TestModel(custom_output_args=fields)
 
 
-def reader(model, **agent_options) -> Ask:
+def reader(model, **agent_options) -> Decide:
     agent = Agent(model, output_type=MessageRead, instructions="You read customer messages.", **agent_options)
-    return Ask(name="read_message", prompt=message_prompt, agent=agent)
+    return Decide(name="read_message", prompt=message_prompt, agent=agent)
 
 
 def machine_with(backend, table, read_message) -> Machine:
@@ -77,7 +77,7 @@ def offered(model: TestModel) -> dict:
 # ── A model decides ──
 
 
-def test_an_ask_moves_the_entity_and_logs_the_decision(backend, table):
+def test_a_decide_moves_the_entity_and_logs_the_decision(backend, table):
     orders = machine_with(backend, table, reader(model_saying(to="confirmed", reason="They said yes")))
     table["1"] = new_order(message="Yes, please send it")
     orders.start(1)
@@ -154,7 +154,7 @@ def test_the_entity_reaches_the_agents_tools_as_deps(backend, table):
     assert seen == [table["1"]]
 
 
-def test_advance_runs_an_ask_like_any_step(backend, table):
+def test_advance_runs_a_decide_like_any_step(backend, table):
     orders = machine_with(backend, table, reader(model_saying(to="cancelled", reason="Changed their mind")))
     table["1"] = new_order(message="Cancel it")
     table["2"] = new_order()
@@ -166,7 +166,7 @@ def test_advance_runs_an_ask_like_any_step(backend, table):
     assert [(m.entity, m.step, m.to_state) for m in moves] == [("1", "read_message", "cancelled")]
 
 
-def test_an_ask_runs_outside_a_machine_with_every_state_open():
+def test_a_decide_runs_outside_a_machine_with_every_state_open():
     read_message = reader(model_saying(to="shipped", reason="-"))
     decision = read_message.run(new_order(message="Hello"))
     assert decision.to is Order.shipped
@@ -175,15 +175,15 @@ def test_an_ask_runs_outside_a_machine_with_every_state_open():
 
 def test_without_an_agent_the_schema_is_asked_of_haiku_and_needs_no_key_to_build(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    read_message = Ask(name="read_message", prompt=message_prompt, schema=MessageRead)
+    read_message = Decide(name="read_message", prompt=message_prompt, schema=MessageRead)
     assert read_message.agent.model == "anthropic:claude-haiku-5-5"
     assert read_message.schema is MessageRead
     assert read_message.decided_by == "llm:anthropic:claude-haiku-5-5"
 
 
 def test_the_default_model_is_a_setting(monkeypatch):
-    monkeypatch.setenv("AGENTIC_FSM_ASK_MODEL", "test")
-    read_message = Ask(name="read_message", prompt=message_prompt, schema=MessageRead)
+    monkeypatch.setenv("AGENTIC_FSM_DECIDE_MODEL", "test")
+    read_message = Decide(name="read_message", prompt=message_prompt, schema=MessageRead)
     assert read_message.decided_by == "llm:test"
 
 
@@ -220,13 +220,13 @@ def test_a_decision_outside_the_steps_rows_is_refused_and_logged(backend, table)
 
 @pytest.fixture
 def unreachable(backend, table):
-    """A machine whose Ask has no model to call and a prompt that must not run."""
+    """A machine whose Decide has no model to call and a prompt that must not run."""
 
     def prompt(order):
         raise AssertionError("the prompt ran")
 
     agent = Agent(output_type=MessageRead, instructions="You read customer messages.")
-    orders = machine_with(backend, table, Ask(name="read_message", prompt=prompt, agent=agent))
+    orders = machine_with(backend, table, Decide(name="read_message", prompt=prompt, agent=agent))
     table["1"] = new_order(message="Yes")
     orders.start(1)
     return orders
@@ -265,7 +265,7 @@ def test_an_answer_the_schema_or_the_rows_do_not_allow_is_refused_and_logged(unr
 
 
 def test_a_bare_decision_is_answered_with_a_state_alone(backend, table):
-    orders = machine_with(backend, table, Ask(name="read_message", prompt=message_prompt))
+    orders = machine_with(backend, table, Decide(name="read_message", prompt=message_prompt))
     table["1"] = new_order(message="No thanks")
     orders.start(1)
 
@@ -281,9 +281,9 @@ def test_a_code_step_takes_no_answer_and_has_no_brief(backend, table):
     orders.start(1)
     orders.fire(1, "read_message")
 
-    with pytest.raises(TransitionError, match="ship is code, not an Ask: it takes no answer"):
+    with pytest.raises(TransitionError, match="ship is code, not a Decide: it takes no answer"):
         orders.fire(1, ship, answer="shipped")
-    with pytest.raises(TransitionError, match="ship is code, not an Ask: there is nothing to brief"):
+    with pytest.raises(TransitionError, match="ship is code, not a Decide: there is nothing to brief"):
         orders.brief(1, ship)
 
 
@@ -330,10 +330,10 @@ def test_a_brief_is_written_from_the_entity_in_hand(backend, table):
     assert brief.prompt == "Where does this message put the order?\nCancel it"
 
 
-# ── Declaring an Ask ──
+# ── Declaring a Decide ──
 
 
-def test_an_ask_typed_for_another_machines_states_is_refused(backend, table):
+def test_a_decide_typed_for_another_machines_states_is_refused(backend, table):
     class Door(States):
         closed = InitialState("Shut")
         open = FinalState("Open")
@@ -342,32 +342,32 @@ def test_an_ask_typed_for_another_machines_states_is_refused(backend, table):
         to: Door
 
     with pytest.raises(MachineError, match="row 0: read_message's Decision types `to` as Door, not Order"):
-        machine_with(backend, table, Ask(name="read_message", prompt=message_prompt, schema=DoorRead))
+        machine_with(backend, table, Decide(name="read_message", prompt=message_prompt, schema=DoorRead))
 
 
 def test_an_agent_whose_output_is_not_a_decision_is_refused():
     with pytest.raises(TypeError, match="read_message: the output type <class 'str'> must subclass Decision"):
-        Ask(name="read_message", prompt=message_prompt, agent=Agent(TestModel()))
+        Decide(name="read_message", prompt=message_prompt, agent=Agent(TestModel()))
 
 
-def test_an_ask_takes_an_agent_or_a_schema_not_both():
+def test_a_decide_takes_an_agent_or_a_schema_not_both():
     agent = Agent(TestModel(), output_type=MessageRead)
     with pytest.raises(TypeError, match="pass agent= or schema=, not both"):
-        Ask(name="read_message", prompt=message_prompt, agent=agent, schema=MessageRead)
+        Decide(name="read_message", prompt=message_prompt, agent=agent, schema=MessageRead)
 
 
 @pytest.mark.parametrize("options", [{"name": "", "prompt": message_prompt}, {"name": "read", "prompt": "Read it"}])
-def test_an_ask_needs_a_name_and_a_prompt_function(options):
+def test_a_decide_needs_a_name_and_a_prompt_function(options):
     with pytest.raises(TypeError):
-        Ask(**options)
+        Decide(**options)
 
 
-def test_an_ask_and_a_function_cannot_share_a_name(backend, table):
+def test_a_decide_and_a_function_cannot_share_a_name(backend, table):
     def read_message(order):
         return Order.cancelled
 
     rows = [
-        (Order.placed, Order.confirmed, Ask(name="read_message", prompt=message_prompt)),
+        (Order.placed, Order.confirmed, Decide(name="read_message", prompt=message_prompt)),
         (Order.confirmed, Order.shipped, ship),
         (Order.confirmed, Order.cancelled, read_message),
     ]

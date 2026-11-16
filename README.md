@@ -66,23 +66,23 @@ entity. Ids are stored as text, so `load` receives a string.
 `Machine(...)` checks the declaration and raises a `MachineError` naming the state or the row:
 exactly one `InitialState`, every state reachable from it, no rows leaving a `FinalState`, no
 other state without a way out, every row's states belonging to the machine, every step a named
-function or an `Ask`, every `Ask` deciding among this machine's states, no two steps sharing a
+function or a `Decide`, every `Decide` deciding among this machine's states, no two steps sharing a
 name.
 
 ## A step a model decides
 
-An `Ask` is a step that puts the question to a model. It has a name, a prompt function and a
+A `Decide` is a step that puts the question to a model. It has a name, a prompt function and a
 schema: a `Decision` whose `to` is typed as your states, plus any fields you want logged with
 the move.
 
 ```python
-from agentic_fsm import Ask, Decision
+from agentic_fsm import Decide, Decision
 
 class MessageRead(Decision):
     to: Order
     reason: str
 
-read_message = Ask(
+read_message = Decide(
     name="read_message",
     prompt=lambda order: order.message and f"Where does this message put the order?\n{order.message}",
     schema=MessageRead,
@@ -117,7 +117,7 @@ reader = Agent(
     tools=[past_orders],
 )
 
-read_message = Ask(name="read_message", agent=reader, prompt=...)
+read_message = Decide(name="read_message", agent=reader, prompt=...)
 ```
 
 A function step may also return a `Decision` in place of a state, for code that calls
@@ -125,7 +125,7 @@ A function step may also return a `Decision` in place of a state, for code that 
 
 ### A session in the model's place
 
-A coding agent or a person can decide an `Ask` with no model key set.
+A coding agent or a person can decide a `Decide` step with no model key set.
 
 ```python
 brief = orders.brief(42, "read_message")
@@ -145,8 +145,8 @@ rows don't allow is refused and logged, and the move's `decided_by` is `agent`.
 | `orders.start(42)` | puts an entity in the initial state |
 | `orders.fire(42, payment_cleared)` | runs one step on one entity |
 | `orders.fire(42, payment_cleared, entity=order)` | the same, on the order already in hand instead of `load(42)` |
-| `orders.fire(42, "read_message", answer=...)` | decides an `Ask` in the model's place |
-| `orders.brief(42, "read_message")` | what an `Ask` would give the model |
+| `orders.fire(42, "read_message", answer=...)` | decides a `Decide` step in the model's place |
+| `orders.brief(42, "read_message")` | what a `Decide` step would give the model |
 | `orders.advance()` | tries the steps out of each unfinished entity's state |
 | `orders.state_of(42)` | the entity's current state |
 | `orders.in_state(Order.paid)` | the ids of the entities in a state |
@@ -189,7 +189,7 @@ code can and no other. Each command calls one of the methods above.
 - **With `DJANGO_SETTINGS_MODULE` set**, `agfsm` sets the Django project up before it loads the
   machine, as `manage.py` would.
 
-`--agent` then `--answer` lets a session decide an `Ask` with no model key: the first prints the
+`--agent` then `--answer` lets a session decide a `Decide` step with no model key: the first prints the
 instructions, the prompt, the choices and the answer's schema; the second applies the answer.
 
 ## State backends
@@ -227,7 +227,7 @@ Every default is in `agentic_fsm/conf/global_settings.py`, the way Django keeps 
 | Setting | Default | Is |
 |---|---|---|
 | `BACKEND` | `None` | the state backend of a machine built without `backend=` |
-| `ASK_MODEL` | `"anthropic:claude-haiku-5-5"` | the model of an `Ask` built without `agent=` |
+| `DECIDE_MODEL` | `"anthropic:claude-haiku-5-5"` | the model of a `Decide` built without `agent=` |
 | `MACHINE` | `None` | the machine `agfsm` loads without `--machine`, as `package.module:name` |
 
 A setting takes the first value found in `settings.configure(BACKEND=...)`, the environment

@@ -3,7 +3,7 @@
     orders = Machine(Order, TRANSITIONS, load=get_order)
 
 A step is a function of the entity that returns the next state, or ``None`` for "not now", or an
-``Ask`` that puts the question to a model. Its allowed targets are the rows it sits on; anything
+``Decide`` that puts the question to a model. Its allowed targets are the rows it sits on; anything
 else it returns is refused and logged, never applied.
 """
 
@@ -12,10 +12,10 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from functools import cached_property
 
-from .ask import Ask, Brief, Decision, answer_fields
 from .backends import BACKEND_ENV, get_backend
 from .backends.base.base import BaseStateBackend, Current, Move, utc_now
 from .conf import settings
+from .decide import Brief, Decide, Decision, answer_fields
 from .states import States
 
 
@@ -131,7 +131,7 @@ class Machine:
 
         ``entity`` is the entity already in hand, given to the step instead of ``load(id)``: a
         caller walking its own rows, or one that has set on the entity what it chose for the
-        step. ``answer`` decides an ``Ask`` in the model's place: its fields as a dict or a JSON
+        step. ``answer`` decides a ``Decide`` step in the model's place: its fields as a dict or a JSON
         object, or a bare state value. No model is called and the prompt function isn't run. An
         answer the schema or the step's rows don't allow is refused and logged.
         """
@@ -141,15 +141,15 @@ class Machine:
         return self._try(current, state, exit_, self._entity(current, entity))
 
     def brief(self, entity_id, step: Callable | str, *, entity=None) -> Brief:
-        """What an ``Ask`` would give the model for this entity, for a session to decide instead.
+        """What a ``Decide`` step would give the model for this entity, for a session to decide instead.
 
         Returns a ``Brief``: the instructions, the prompt, the choices with their descriptions,
         the answer's JSON Schema and the agent's tools. Answer it with ``fire(..., answer=)``.
         ``entity`` is as for ``fire``.
         """
         current, state, exit_ = self._exit_for(entity_id, step)
-        if not isinstance(exit_.step, Ask):
-            raise TransitionError(f"{_step_name(exit_.step)} is code, not an Ask: there is nothing to brief")
+        if not isinstance(exit_.step, Decide):
+            raise TransitionError(f"{_step_name(exit_.step)} is code, not a Decide: there is nothing to brief")
         return exit_.step.brief(self._entity(current, entity), exit_.targets)
 
     def advance(self) -> list[Move]:
@@ -173,7 +173,7 @@ class Machine:
         return moves
 
     def _try(self, current: Current, state: States, exit_: _Exit, entity) -> Move | None:
-        if isinstance(exit_.step, Ask):
+        if isinstance(exit_.step, Decide):
             result, decided_by = exit_.step.run(entity, exit_.targets), exit_.step.decided_by
         else:
             result, decided_by = exit_.step(entity), "code"
@@ -184,8 +184,8 @@ class Machine:
     def _answer(self, current: Current, state: States, exit_: _Exit, answer) -> Move:
         """Apply an answer given in the model's place, or log why it can't be."""
         step = exit_.step
-        if not isinstance(step, Ask):
-            raise TransitionError(f"{_step_name(step)} is code, not an Ask: it takes no answer")
+        if not isinstance(step, Decide):
+            raise TransitionError(f"{_step_name(step)} is code, not a Decide: it takes no answer")
         fields = answer_fields(answer)
         try:
             decision = step.parse(fields, exit_.targets)
@@ -291,7 +291,7 @@ def _check_member(states: type[States], state, index: int):
 
 
 def _check_step(states: type[States], step, index: int):
-    if isinstance(step, Ask):
+    if isinstance(step, Decide):
         if step.states not in (states, States):
             raise MachineError(
                 f"row {index}: {step.name}'s Decision types `to` as {step.states.__name__}, "
@@ -299,7 +299,7 @@ def _check_step(states: type[States], step, index: int):
             )
         return
     if not callable(step) or isinstance(step, type):
-        raise MachineError(f"row {index}: the step {step!r} is not a function or an Ask")
+        raise MachineError(f"row {index}: the step {step!r} is not a function or a Decide")
     name = getattr(step, "__name__", None)
     if not name or name == "<lambda>":
         raise MachineError(f"row {index}: the step {step!r} has no name; define it with def")
@@ -367,7 +367,7 @@ def _check_all_reachable(states: type[States], initial: States, exits):
 
 
 def _step_name(step) -> str:
-    return step.name if isinstance(step, Ask) else step.__name__
+    return step.name if isinstance(step, Decide) else step.__name__
 
 
 def _stored(result) -> str:
