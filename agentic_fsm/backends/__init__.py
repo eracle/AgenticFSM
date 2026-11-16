@@ -10,22 +10,22 @@ and is the only place Django is imported. A backend from outside this package wo
 way.
 """
 
-import os
 from importlib import import_module
 
+from ..conf import ENV_PREFIX, settings
 from .base.base import BaseStateBackend
 
-BACKEND_ENV = "AGENTIC_FSM_BACKEND"
+BACKEND_ENV = f"{ENV_PREFIX}BACKEND"
 
 
 def get_backend(backend: BaseStateBackend | str | None = None) -> BaseStateBackend:
     """The backend to use: an instance as given, or one built from a backend package's path.
 
-    With no argument the path comes from ``AGENTIC_FSM_BACKEND``.
+    With no argument the path is the ``BACKEND`` setting.
     """
     if isinstance(backend, BaseStateBackend):
         return backend
-    path = backend or os.environ.get(BACKEND_ENV)
+    path = backend or settings.BACKEND
     if not path:
         raise LookupError(f"no state backend: pass backend= or set {BACKEND_ENV}")
     return _load(path)()

@@ -9,7 +9,7 @@ in an append-only log, and refuses a move the list doesn't have.
 ## Install
 
 ```bash
-pip install agentic-fsm            # the core, no dependencies
+pip install agentic-fsm            # the library; brings Pydantic AI for steps a model decides
 pip install "agentic-fsm[django]"  # with the Django state backend
 ```
 
@@ -66,7 +66,77 @@ entity. Ids are stored as text, so `load` receives a string.
 `Machine(...)` checks the declaration and raises a `MachineError` naming the state or the row:
 exactly one `InitialState`, every state reachable from it, no rows leaving a `FinalState`, no
 other state without a way out, every row's states belonging to the machine, every step a named
-function, no two steps sharing a name.
+function or an `Ask`, every `Ask` deciding among this machine's states, no two steps sharing a
+name.
+
+## A step a model decides
+
+An `Ask` is a step that puts the question to a model. It has a name, a prompt function and a
+schema: a `Decision` whose `to` is typed as your states, plus any fields you want logged with
+the move.
+
+```python
+from agentic_fsm import Ask, Decision
+
+class MessageRead(Decision):
+    to: Order
+    reason: str
+
+read_message = Ask(
+    name="read_message",
+    prompt=lambda order: order.message and f"Where does this message put the order?\n{order.message}",
+    schema=MessageRead,
+)
+
+TRANSITIONS = [
+    ...
+    (Order.pending,  Order.cancelled,  read_message),
+    (Order.paid,     Order.cancelled,  read_message),
+]
+```
+
+- **The model is offered only the step's rows** out of the order's state, each with its
+  description, so the prompt never has to explain what a state means.
+- **A prompt that returns nothing means "not now"**: no call is made and the order stays.
+- **The whole `Decision` is logged** with the move, and the move's `decided_by` is
+  `llm:<model>`.
+
+For tools, another model, retries or output validators, declare a
+[Pydantic AI](https://ai.pydantic.dev) `Agent` and pass it as `agent=` in place of `schema=`.
+Its output type is the schema, and the entity is passed as `deps`, so each tool reads it from
+`ctx.deps`.
+
+```python
+from pydantic_ai import Agent
+
+reader = Agent(
+    "anthropic:claude-haiku-5-5",
+    deps_type=OrderRow,
+    output_type=MessageRead,
+    instructions="You read messages from a shop's customers.",
+    tools=[past_orders],
+)
+
+read_message = Ask(name="read_message", agent=reader, prompt=...)
+```
+
+A function step may also return a `Decision` in place of a state, for code that calls
+`read_message.run(order)` itself or decides by rule and wants its reason logged.
+
+### A session in the model's place
+
+A coding agent or a person can decide an `Ask` with no model key set.
+
+```python
+brief = orders.brief(42, "read_message")
+# brief.instructions, brief.prompt, brief.choices, brief.schema, brief.tools
+
+orders.fire(42, "read_message", answer={"to": "cancelled", "reason": "They asked for a refund"})
+```
+
+`answer=` takes the fields as a dict or a JSON object, or a bare state value when the schema is
+a plain `Decision`. The prompt function doesn't run again. An answer the schema or the step's
+rows don't allow is refused and logged, and the move's `decided_by` is `agent`.
 
 ## Moving entities
 
@@ -74,6 +144,8 @@ function, no two steps sharing a name.
 |---|---|
 | `orders.start(42)` | puts an entity in the initial state |
 | `orders.fire(42, payment_cleared)` | runs one step on one entity |
+| `orders.fire(42, "read_message", answer=...)` | decides an `Ask` in the model's place |
+| `orders.brief(42, "read_message")` | what an `Ask` would give the model |
 | `orders.advance()` | tries the steps out of each unfinished entity's state |
 | `orders.state_of(42)` | the entity's current state |
 | `orders.in_state(Order.paid)` | the ids of the entities in a state |
@@ -119,6 +191,25 @@ your rows and the move together.
 
 A backend of your own is a package whose `base` module has a `StateBackend` subclassing
 `agentic_fsm.BaseStateBackend`.
+
+## Settings
+
+Every default is in `agentic_fsm/conf/global_settings.py`, the way Django keeps its own.
+
+| Setting | Default | Is |
+|---|---|---|
+| `BACKEND` | `None` | the state backend of a machine built without `backend=` |
+| `ASK_MODEL` | `"anthropic:claude-haiku-5-5"` | the model of an `Ask` built without `agent=` |
+
+A setting takes the first value found in `settings.configure(BACKEND=...)`, the environment
+variable `AGENTIC_FSM_<NAME>`, the module named by `AGENTIC_FSM_SETTINGS_MODULE`, then the
+default.
+
+```python
+from agentic_fsm import settings
+
+settings.configure(BACKEND="agentic_fsm.backends.django")
+```
 
 ## Development
 

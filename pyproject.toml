@@ -31,7 +31,9 @@ classifiers = [
     "Framework :: Django",
 ]
 
-dependencies = []
+dependencies = [
+    "pydantic-ai-slim[anthropic]>=2.68",
+]
 
 [project.optional-dependencies]
 django = [
