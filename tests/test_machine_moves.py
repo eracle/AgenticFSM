@@ -55,6 +55,21 @@ def test_fire_takes_a_step_by_name(orders, table):
     assert orders.fire(1, "payment_cleared").to_state == "paid"
 
 
+def test_fire_gives_the_step_the_entity_in_hand_without_loading_it(orders, table):
+    table["1"] = new_order()
+    orders.start(1)
+
+    move = orders.fire(1, payment_cleared, entity=new_order(payment_cleared=True))
+
+    assert move.to_state == "paid" and move.applied
+
+
+def test_fire_loads_the_entity_when_none_is_given(orders, table):
+    table["1"] = new_order()
+    orders.start(1)
+    assert orders.fire(1, payment_cleared) is None
+
+
 def test_a_step_that_returns_none_moves_and_logs_nothing(orders, table):
     table["1"] = new_order()
     orders.start(1)

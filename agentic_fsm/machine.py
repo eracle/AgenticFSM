@@ -126,28 +126,31 @@ class Machine:
         """Put an entity in the initial state. Raises ``AlreadyStarted`` if it has a state."""
         return self.backend.start(self.name, str(entity_id), self.initial.value)
 
-    def fire(self, entity_id, step: Callable | str, *, answer=None) -> Move | None:
+    def fire(self, entity_id, step: Callable | str, *, entity=None, answer=None) -> Move | None:
         """Run one step on one entity: the logged move, or ``None`` if the step said "not now".
 
-        ``answer`` decides an ``Ask`` in the model's place: its fields as a dict or a JSON object,
-        or a bare state value. No model is called and the prompt function isn't run. An answer
-        the schema or the step's rows don't allow is refused and logged.
+        ``entity`` is the entity already in hand, given to the step instead of ``load(id)``: a
+        caller walking its own rows, or one that has set on the entity what it chose for the
+        step. ``answer`` decides an ``Ask`` in the model's place: its fields as a dict or a JSON
+        object, or a bare state value. No model is called and the prompt function isn't run. An
+        answer the schema or the step's rows don't allow is refused and logged.
         """
         current, state, exit_ = self._exit_for(entity_id, step)
         if answer is not None:
             return self._answer(current, state, exit_, answer)
-        return self._try(current, state, exit_, self.load(current.entity))
+        return self._try(current, state, exit_, self._entity(current, entity))
 
-    def brief(self, entity_id, step: Callable | str) -> Brief:
+    def brief(self, entity_id, step: Callable | str, *, entity=None) -> Brief:
         """What an ``Ask`` would give the model for this entity, for a session to decide instead.
 
         Returns a ``Brief``: the instructions, the prompt, the choices with their descriptions,
         the answer's JSON Schema and the agent's tools. Answer it with ``fire(..., answer=)``.
+        ``entity`` is as for ``fire``.
         """
         current, state, exit_ = self._exit_for(entity_id, step)
         if not isinstance(exit_.step, Ask):
             raise TransitionError(f"{_step_name(exit_.step)} is code, not an Ask: there is nothing to brief")
-        return exit_.step.brief(self.load(current.entity), exit_.targets)
+        return exit_.step.brief(self._entity(current, entity), exit_.targets)
 
     def advance(self) -> list[Move]:
         """Try the steps out of each non-final entity's state, in list order.
@@ -224,6 +227,9 @@ class Machine:
         return None
 
     # ── Lookups ──
+
+    def _entity(self, current: Current, entity):
+        return self.load(current.entity) if entity is None else entity
 
     def _exit_for(self, entity_id, step: Callable | str) -> tuple[Current, States, _Exit]:
         """The entity's current row, its state, and the step's exit from it; raises if there's none."""

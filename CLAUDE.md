@@ -43,6 +43,7 @@ by whoever knows something new. A machine is three plain Python things.
 |---|---|
 | `start(id)` | puts an entity in the initial state; `AlreadyStarted` if it has one |
 | `fire(id, step)` | runs one step (the function, the `Ask` or its name); returns the logged `Move`, or `None` for "not now" |
+| `fire(id, step, entity=)` | the same, on the entity already in hand instead of `load(id)` (`brief` takes it too) |
 | `fire(id, step, answer=)` | decides an `Ask` in the model's place; no model call, the prompt doesn't run |
 | `brief(id, step)` | the `Brief` an `Ask` would give the model: instructions, prompt, choices, schema, tools |
 | `advance()` | per unfinished entity, tries the steps out of its state in list order and stops at the first that doesn't return `None`: at most one move per entity per call |

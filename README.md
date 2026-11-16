@@ -144,6 +144,7 @@ rows don't allow is refused and logged, and the move's `decided_by` is `agent`.
 |---|---|
 | `orders.start(42)` | puts an entity in the initial state |
 | `orders.fire(42, payment_cleared)` | runs one step on one entity |
+| `orders.fire(42, payment_cleared, entity=order)` | the same, on the order already in hand instead of `load(42)` |
 | `orders.fire(42, "read_message", answer=...)` | decides an `Ask` in the model's place |
 | `orders.brief(42, "read_message")` | what an `Ask` would give the model |
 | `orders.advance()` | tries the steps out of each unfinished entity's state |

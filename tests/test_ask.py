@@ -320,6 +320,16 @@ def test_a_brief_with_no_prompt_says_not_now(backend, table):
     assert orders.brief(1, "read_message").prompt is None
 
 
+def test_a_brief_is_written_from_the_entity_in_hand(backend, table):
+    orders = machine_with(backend, table, reader(model_saying(to="confirmed", reason="-")))
+    table["1"] = new_order()
+    orders.start(1)
+
+    brief = orders.brief(1, "read_message", entity=new_order(message="Cancel it"))
+
+    assert brief.prompt == "Where does this message put the order?\nCancel it"
+
+
 # ── Declaring an Ask ──
 
 
