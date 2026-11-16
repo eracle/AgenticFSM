@@ -4,7 +4,7 @@ Entity lifecycles declared once and advanced the same way by code, a model or an
 
 An order, a ticket or an application sits in a state for days and is moved along by whatever
 knows something new about it. AgenticFSM keeps the allowed moves in one list, records every move
-in an append-only log, and refuses a move the list doesn't have.
+in an append-only log, and raises on a move the list doesn't have.
 
 ## Install
 
@@ -135,8 +135,9 @@ orders.fire(42, "read_message", answer={"to": "cancelled", "reason": "They asked
 ```
 
 `answer=` takes the fields as a dict or a JSON object, or a bare state value when the schema is
-a plain `Decision`. The prompt function doesn't run again. An answer the schema or the step's
-rows don't allow is refused and logged, and the move's `decided_by` is `agent`.
+a plain `Decision`. The prompt function doesn't run again, and the move's `decided_by` is
+`agent`. An answer the schema or the step's rows don't allow raises `TransitionError` with the
+reason; nothing is written, and the session answers again.
 
 ## Moving entities
 
@@ -147,23 +148,29 @@ rows don't allow is refused and logged, and the move's `decided_by` is `agent`.
 | `orders.fire(42, payment_cleared, entity=order)` | the same, on the order already in hand instead of `load(42)` |
 | `orders.fire(42, "read_message", answer=...)` | decides a `Decide` step in the model's place |
 | `orders.brief(42, "read_message")` | what a `Decide` step would give the model |
-| `orders.advance()` | tries the steps out of each unfinished entity's state |
+| `orders.progress(42)` | moves one entity until it rests |
+| `orders.progress_all()` | tries the steps out of each unfinished entity's state: at most one move each |
 | `orders.state_of(42)` | the entity's current state |
 | `orders.in_state(Order.paid)` | the ids of the entities in a state |
 | `orders.history(42)` | every move logged for the entity |
 | `orders.graph()` | the states and rows as data, for review |
 
-- **A step's targets are the rows it sits on.** If `payment_cleared` returns anything but
-  `Order.paid`, the move is refused and logged, and the order stays where it is.
-- **`fire` returns the logged `Move`**, with `applied` true or false and a `reason` when
-  refused, or `None` when the step said "not now".
-- **`advance` tries steps in list order** and stops at the first that doesn't return `None`, so
-  each entity makes at most one move per call. When to call it is up to you: a cron job, a
-  scheduler, a script.
-- **Two callers can't both move an entity.** A move is written only if the entity hasn't moved
-  since it was read. The one that comes second is refused and logged.
+- **Every row in the log is a move that happened.** A step's targets are the rows it sits on:
+  if `payment_cleared` returns anything but `Order.paid`, that's a bug, `fire` raises
+  `TransitionError`, and nothing is written. Whatever a step can meet (a bounce, a failed
+  payment) is a state with its own row.
+- **`fire` returns the logged `Move`**, or `None` when the step said "not now".
+- **`progress_all` tries steps in list order** and stops at the first that doesn't return
+  `None`, so each entity makes at most one move per call. When to call it is up to you: a cron
+  job, a scheduler, a script.
+- **`progress` goes on until the entity rests**: a final state, or one whose steps all say "not
+  now". It loads the entity afresh after each move, commits each move, and stops after a move
+  that brings the entity back to a state it already left, so it never loops.
+- **Two callers can't both move an entity.** `fire` locks the entity from the read of its state
+  to the write of the move; a second caller waits, then reads the state the first left. With
+  the Django backend the step's own writes commit with the move.
 - **A step with an outside effect should be safe to run twice.** If it sends an email and the
-  process dies before the move is written, the next `advance` runs it again.
+  process dies before the move commits, the next call runs it again.
 
 ## At the command line
 
@@ -178,14 +185,16 @@ code can and no other. Each command calls one of the methods above.
 | `agfsm fire order:42 payment_cleared` | `orders.fire(42, "payment_cleared")` |
 | `agfsm fire order:42 read_message --agent` | `orders.brief(42, "read_message")` |
 | `agfsm fire order:42 read_message --answer '{...}'` | `orders.fire(42, "read_message", answer=...)` |
-| `agfsm advance` | `orders.advance()` |
+| `agfsm progress order:42` | `orders.progress(42)` |
+| `agfsm progress_all` | `orders.progress_all()` |
 
 - **The machine** is named as `--machine package.module:name` (a module in the working directory
   works), or by the `MACHINE` setting: `export AGENTIC_FSM_MACHINE=shop.lifecycle:orders`.
 - **An entity** is `<machine name>:<id>`, and the name must be the loaded machine's.
 - **`--json`** prints the result as data: the `Move`, `Brief` or `Graph`, with times as ISO text.
-- **The exit code** is 0 for a move applied or "not now", 1 for a move refused, 2 for one that
-  can't be tried (an unknown step, an entity not started, no machine).
+- **The exit code** is 0 for a move made or "not now", 2 for one that can't be made (an unknown
+  step, an entity not started, an answer that doesn't validate, no machine), with the reason on
+  stderr.
 - **With `DJANGO_SETTINGS_MODULE` set**, `agfsm` sets the Django project up before it loads the
   machine, as `manage.py` would.
 

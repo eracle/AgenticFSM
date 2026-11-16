@@ -7,7 +7,7 @@ from pydantic_ai import Agent, models
 from pydantic_ai.models.test import TestModel
 
 from agentic_fsm import Decide, Machine
-from agentic_fsm.cli import EXIT_ERROR, EXIT_OK, EXIT_REFUSED, main, mermaid
+from agentic_fsm.cli import EXIT_ERROR, EXIT_OK, main, mermaid
 
 from . import machines
 from .conftest import new_order
@@ -136,7 +136,6 @@ def test_start_json_is_the_move_with_its_time_as_iso_text(capsys, cli_orders):
     _, data = run_json(capsys, *ORDERS, "start", "order:42")
     assert data["entity"] == "42"
     assert data["to_state"] == "pending"
-    assert data["applied"] is True
     assert "T" in data["at"]
 
 
@@ -171,7 +170,7 @@ def test_list_refuses_a_value_that_is_not_a_state(capsys, cli_orders):
     assert "pending, paid" in err
 
 
-# ── fire and advance with code steps ──
+# ── fire, progress and progress_all with code steps ──
 
 
 def test_fire_applies_a_code_step(capsys, cli_orders, table):
@@ -205,17 +204,30 @@ def test_fire_of_an_entity_not_started_is_an_error(capsys, cli_orders):
     assert "hasn't started" in err
 
 
-def test_advance_prints_the_moves_logged(capsys, cli_orders, table):
+def test_progress_all_prints_the_moves_made(capsys, cli_orders, table):
     table["1"] = new_order(payment_cleared=True)
     table["2"] = new_order()
     cli_orders.start(1)
     cli_orders.start(2)
-    code, data = run_json(capsys, *ORDERS, "advance")
+    code, data = run_json(capsys, *ORDERS, "progress_all")
     assert code == EXIT_OK
     assert [(m["entity"], m["to_state"]) for m in data] == [("1", "paid")]
 
 
-def test_advance_exits_non_zero_when_a_move_is_refused(capsys, backend, table, monkeypatch):
+def test_progress_moves_one_entity_until_it_rests(capsys, cli_orders, table):
+    table["42"] = new_order(payment_cleared=True, tracking_number="TRK1")
+    cli_orders.start(42)
+    code, out, _ = run(capsys, *ORDERS, "progress", "order:42")
+    assert code == EXIT_OK
+    assert out.strip().splitlines() == [
+        "order:42 pending -> paid by payment_cleared, decided by code",
+        "",
+        "order:42 paid -> shipped by ship, decided by code",
+    ]
+    assert run(capsys, *ORDERS, "progress", "order:42")[1].strip() == "nothing moved"
+
+
+def test_a_step_outside_its_rows_is_an_error_and_writes_nothing(capsys, backend, table, monkeypatch):
     from .conftest import TRANSITIONS, Order
 
     def ship(order):
@@ -227,10 +239,10 @@ def test_advance_exits_non_zero_when_a_move_is_refused(capsys, backend, table, m
     table["1"] = new_order(payment_cleared=True)
     machine.start(1)
     machine.fire(1, "payment_cleared")
-    code, out, _ = run(capsys, *ORDERS, "advance")
-    assert code == EXIT_REFUSED
-    assert out.startswith("refused: order:1 paid -> delivered by ship")
-    assert "may move paid only to shipped" in out
+    code, _, err = run(capsys, *ORDERS, "progress_all")
+    assert code == EXIT_ERROR
+    assert "may move paid only to shipped" in err
+    assert machine.state_of(1).value == "paid"
 
 
 # ── A Decide at the CLI ──
@@ -264,7 +276,7 @@ def test_agent_then_answer_finishes_a_decide_with_no_model_key(capsys, cli_messa
     answer = json.dumps({"to": "cancelled", "reason": "They asked to cancel"})
     code, move = run_json(capsys, *MESSAGES, "fire", "order:7", "read_message", "--answer", answer)
     assert code == EXIT_OK
-    assert (move["to_state"], move["decided_by"], move["applied"]) == ("cancelled", "agent", True)
+    assert (move["to_state"], move["decided_by"]) == ("cancelled", "agent")
     assert move["decision"] == {"to": "cancelled", "reason": "They asked to cancel"}
     assert cli_messages.state_of(7).value == "cancelled"
 
@@ -285,14 +297,15 @@ def test_agent_says_not_now_when_the_prompt_has_nothing_to_ask(capsys, cli_messa
     assert out.startswith("not now")
 
 
-def test_an_answer_outside_the_rows_is_refused_and_exits_non_zero(capsys, cli_messages, table):
+def test_an_answer_outside_the_rows_goes_back_to_the_session(capsys, cli_messages, table):
     table["7"] = new_message_order(message="Ship it")
     cli_messages.start(7)
     answer = json.dumps({"to": "shipped", "reason": "They want it"})
-    code, out, _ = run(capsys, *MESSAGES, "fire", "order:7", "read_message", "--answer", answer)
-    assert code == EXIT_REFUSED
-    assert out.startswith("refused: order:7 placed -> shipped by read_message, decided by agent")
+    code, out, err = run(capsys, *MESSAGES, "fire", "order:7", "read_message", "--answer", answer)
+    assert (code, out) == (EXIT_ERROR, "")
+    assert err.startswith("agfsm: the answer to read_message doesn't validate")
     assert cli_messages.state_of(7).value == "placed"
+    assert len(cli_messages.history(7)) == 1
 
 
 def test_agent_on_a_code_step_is_an_error(capsys, cli_orders, table):

@@ -1,10 +1,13 @@
-"""``start``, ``fire`` and ``advance``, run against every state backend."""
+"""``start``, ``fire``, ``progress`` and ``progress_all``, run against every state backend."""
 
 from datetime import UTC
+from threading import Event, Thread
+from types import SimpleNamespace
 
 import pytest
 
-from agentic_fsm import AlreadyStarted, Machine, TransitionError
+from agentic_fsm import AlreadyStarted, Machine, TransitionError, get_backend
+from agentic_fsm.backends.locmem.base import StateBackend as LocmemBackend
 
 from .conftest import TRANSITIONS, Order, cancel, carrier_delivered, new_order, payment_cleared, ship
 
@@ -14,7 +17,7 @@ from .conftest import TRANSITIONS, Order, cancel, carrier_delivered, new_order, 
 
 def test_start_puts_an_entity_in_the_initial_state(orders):
     move = orders.start(1)
-    assert (move.from_state, move.to_state, move.applied, move.step) == (None, "pending", True, None)
+    assert (move.from_state, move.to_state, move.step) == (None, "pending", None)
     assert orders.state_of(1) is Order.pending
     assert orders.in_state(Order.pending) == ["1"]
     assert orders.history(1) == [move]
@@ -42,7 +45,7 @@ def test_fire_moves_the_entity_and_logs_it(orders, table):
     move = orders.fire(1, payment_cleared)
 
     assert (move.step, move.from_state, move.to_state) == ("payment_cleared", "pending", "paid")
-    assert move.applied and move.decided_by == "code" and move.reason is None
+    assert move.decided_by == "code"
     assert move.at.tzinfo == UTC
     assert orders.state_of(1) is Order.paid
     assert orders.in_state(Order.pending) == []
@@ -61,7 +64,7 @@ def test_fire_gives_the_step_the_entity_in_hand_without_loading_it(orders, table
 
     move = orders.fire(1, payment_cleared, entity=new_order(payment_cleared=True))
 
-    assert move.to_state == "paid" and move.applied
+    assert move.to_state == "paid"
 
 
 def test_fire_loads_the_entity_when_none_is_given(orders, table):
@@ -112,113 +115,202 @@ def test_a_step_that_raises_leaves_no_trace(orders):
     assert len(orders.history(1)) == 1
 
 
-# ── Refusals ──
+# ── A result the rows don't allow ──
 
 
-def machine_with(backend, table, step, rows):
+def machine_with(backend, table, rows):
     return Machine(Order, rows, load=lambda order_id: table[order_id], backend=backend)
 
 
-def test_a_state_outside_the_steps_rows_is_refused_and_logged(backend, table):
+def test_a_state_outside_the_steps_rows_raises_and_writes_nothing(backend, table):
     def payment_cleared(order):  # may only move pending -> paid
         return Order.shipped
 
     rows = [(Order.pending, Order.paid, payment_cleared), *TRANSITIONS[2:], TRANSITIONS[0]]
-    orders = machine_with(backend, table, payment_cleared, rows)
+    orders = machine_with(backend, table, rows)
     table["1"] = new_order()
     orders.start(1)
 
-    move = orders.fire(1, payment_cleared)
+    with pytest.raises(TransitionError, match="payment_cleared returned shipped, but may move pending only to paid"):
+        orders.fire(1, payment_cleared)
 
-    assert not move.applied
-    assert (move.from_state, move.to_state) == ("pending", "shipped")
-    assert move.reason == "payment_cleared may move pending only to paid"
     assert orders.state_of(1) is Order.pending
-    assert orders.history(1)[-1] == move
+    assert len(orders.history(1)) == 1
 
 
 @pytest.mark.parametrize("result", ["paid", 42])
-def test_a_result_that_is_not_a_state_is_refused_and_logged(backend, table, result):
+def test_a_result_that_is_not_a_state_raises_and_writes_nothing(backend, table, result):
     def payment_cleared(order):
         return result
 
     rows = [(Order.pending, Order.paid, payment_cleared), *TRANSITIONS[2:], TRANSITIONS[0]]
-    orders = machine_with(backend, table, payment_cleared, rows)
+    orders = machine_with(backend, table, rows)
     table["1"] = new_order()
     orders.start(1)
 
-    move = orders.fire(1, payment_cleared)
+    with pytest.raises(TransitionError, match=f"returned {result!r}, which is not a state of Order"):
+        orders.fire(1, payment_cleared)
 
-    assert not move.applied
-    assert move.to_state == str(result)
-    assert move.reason == f"{result!r} is not a state of Order"
     assert orders.state_of(1) is Order.pending
+    assert len(orders.history(1)) == 1
 
 
-def test_a_move_that_loses_a_race_is_refused_and_logged(backend, table):
-    """While payment_cleared runs, someone else cancels the order."""
+# ── The lock ──
+
+
+def test_a_second_fire_waits_for_the_first_and_reads_the_state_it_left(table):
+    """While payment_cleared runs in one thread, another tries to cancel the same order."""
+    backend = get_backend("agentic_fsm.backends.locmem")
+    step_running, may_finish = Event(), Event()
 
     def payment_cleared(order):
-        orders.fire(1, cancel)
+        step_running.set()
+        may_finish.wait(timeout=5)
         return Order.paid
 
     rows = [TRANSITIONS[0], (Order.pending, Order.paid, payment_cleared), *TRANSITIONS[2:]]
-    orders = machine_with(backend, table, payment_cleared, rows)
+    orders = machine_with(backend, table, rows)
     table["1"] = new_order(cancel_requested=True)
     orders.start(1)
 
-    move = orders.fire(1, payment_cleared)
+    first = Thread(target=orders.fire, args=(1, payment_cleared))
+    first.start()
+    step_running.wait(timeout=5)
+    second = Thread(target=lambda: orders.fire(1, cancel))
+    second.start()
+    second.join(timeout=0.2)
+    assert second.is_alive(), "the second fire should wait on the first's lock"
 
-    assert not move.applied
-    assert move.reason == "moved by someone else since it was read in pending"
-    assert orders.state_of(1) is Order.cancelled
-    assert [(m.to_state, m.applied) for m in orders.history(1)] == [
-        ("pending", True),
-        ("cancelled", True),
-        ("paid", False),
+    may_finish.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert [(m.from_state, m.to_state) for m in orders.history(1)] == [
+        (None, "pending"),
+        ("pending", "paid"),
+        ("paid", "cancelled"),
     ]
 
 
-# ── advance ──
+def test_a_step_that_raises_rolls_back_what_it_wrote(backend, table):
+    def payment_cleared(order):
+        orders.fire(2, cancel)  # a write inside the lock, undone with the step
+        raise RuntimeError("the payment provider is down")
+
+    rows = [TRANSITIONS[0], (Order.pending, Order.paid, payment_cleared), *TRANSITIONS[2:]]
+    orders = machine_with(backend, table, rows)
+    table["1"], table["2"] = new_order(), new_order(cancel_requested=True)
+    orders.start(1)
+    orders.start(2)
+
+    with pytest.raises(RuntimeError):
+        orders.fire(1, payment_cleared)
+
+    assert orders.state_of(1) is Order.pending
+    if isinstance(backend, LocmemBackend):
+        return  # memory has no transaction to undo the nested move
+    assert orders.state_of(2) is Order.pending
 
 
-def test_advance_makes_one_move_per_entity(orders, table):
+# ── progress_all ──
+
+
+def test_progress_all_makes_one_move_per_entity(orders, table):
     table["1"] = new_order(payment_cleared=True, tracking_number="TRK1", delivered=True)
     orders.start(1)
 
-    assert [m.to_state for m in orders.advance()] == ["paid"]
-    assert [m.to_state for m in orders.advance()] == ["shipped"]
-    assert [m.to_state for m in orders.advance()] == ["delivered"]
-    assert orders.advance() == []
+    assert [m.to_state for m in orders.progress_all()] == ["paid"]
+    assert [m.to_state for m in orders.progress_all()] == ["shipped"]
+    assert [m.to_state for m in orders.progress_all()] == ["delivered"]
+    assert orders.progress_all() == []
     assert orders.state_of(1) is Order.delivered
 
 
-def test_advance_tries_steps_in_list_order(orders, table):
+def test_progress_all_tries_steps_in_list_order(orders, table):
     table["1"] = new_order(cancel_requested=True, payment_cleared=True)
     orders.start(1)
 
-    assert [(m.step, m.to_state) for m in orders.advance()] == [("cancel", "cancelled")]
+    assert [(m.step, m.to_state) for m in orders.progress_all()] == [("cancel", "cancelled")]
 
 
-def test_advance_leaves_entities_with_nothing_to_do(orders, table):
+def test_progress_all_leaves_entities_with_nothing_to_do(orders, table):
     table["1"] = new_order()
     table["2"] = new_order(payment_cleared=True)
     orders.start(1)
     orders.start(2)
 
-    moves = orders.advance()
+    moves = orders.progress_all()
 
     assert [(m.entity, m.to_state) for m in moves] == [("2", "paid")]
     assert orders.in_state(Order.pending) == ["1"]
 
 
-def test_advance_never_loads_a_finished_entity(orders, table):
+def test_progress_all_never_loads_a_finished_entity(orders, table):
     table["1"] = new_order(cancel_requested=True)
     orders.start(1)
-    orders.advance()
+    orders.progress_all()
     del table["1"]  # loading it now would raise
 
-    assert orders.advance() == []
+    assert orders.progress_all() == []
+
+
+# ── progress ──
+
+
+def test_progress_moves_one_entity_until_it_rests(orders, table):
+    table["1"] = new_order(payment_cleared=True, tracking_number="TRK1", delivered=True)
+    table["2"] = new_order(payment_cleared=True)
+    orders.start(1)
+    orders.start(2)
+
+    moves = orders.progress(1)
+
+    assert [(m.from_state, m.to_state) for m in moves] == [
+        ("pending", "paid"),
+        ("paid", "shipped"),
+        ("shipped", "delivered"),
+    ]
+    assert orders.state_of(2) is Order.pending
+
+
+def test_progress_rests_where_every_step_says_not_now(orders, table):
+    table["1"] = new_order(payment_cleared=True)
+    orders.start(1)
+
+    assert [m.to_state for m in orders.progress(1)] == ["paid"]
+    assert orders.progress(1) == []
+    assert orders.state_of(1) is Order.paid
+
+
+def test_progress_loads_the_entity_afresh_after_each_move(orders, table):
+    loads = []
+    order = new_order(payment_cleared=True, tracking_number="TRK1")
+    orders.load = lambda order_id: loads.append(order_id) or order
+    orders.start(1)
+
+    orders.progress(1)
+
+    assert loads == ["1", "1", "1"]  # pending, paid, then shipped where nothing moves it
+
+
+def test_progress_stops_when_it_comes_back_to_a_state_it_left(backend, table):
+    def flip(order):  # a step that would bounce the order between two states for ever
+        order.flips += 1
+        return Order.paid if order.flips % 2 else Order.pending
+
+    rows = [TRANSITIONS[0], (Order.pending, Order.paid, flip), (Order.paid, Order.pending, flip), *TRANSITIONS[2:]]
+    orders = machine_with(backend, table, rows)
+    table["1"] = SimpleNamespace(**vars(new_order()), flips=0)
+    orders.start(1)
+
+    moves = orders.progress(1)
+
+    assert [(m.from_state, m.to_state) for m in moves] == [("pending", "paid"), ("paid", "pending")]
+
+
+def test_progress_refuses_an_entity_that_has_not_started(orders):
+    with pytest.raises(TransitionError, match="order:1 hasn't started"):
+        orders.progress(1)
 
 
 # ── Machines and stored state ──

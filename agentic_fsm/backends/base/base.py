@@ -1,38 +1,36 @@
 """What every state backend stores and the calls a machine makes on it.
 
-A backend keeps two things: an append-only log of moves, and one current-state row per entity.
-A move that's applied rewrites that row in the same transaction as its log row, and only if the
-entity's version is still the one the caller read (compare-and-set). A backend stores state,
-never the entity.
+A backend keeps two things: an append-only log of the moves made, and one current-state row per
+entity. A machine reads an entity's row under ``lock``, runs a step, and writes the move inside
+that same lock, so a second caller waits and then reads the state the first left. A backend
+stores state, never the entity.
 """
 
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 
 @dataclass(frozen=True)
 class Move:
-    """One log row: a move applied, or one refused."""
+    """One log row: a move that happened."""
 
     machine: str
     entity: str
     step: str | None
     from_state: str | None
     to_state: str
-    applied: bool
     decided_by: str
     at: datetime
     decision: dict | None = None
-    reason: str | None = None
 
 
 @dataclass(frozen=True)
 class Current:
-    """An entity's current state, with the version a move must still find to be applied."""
+    """An entity's current state."""
 
     entity: str
     state: str
-    version: int
 
 
 class AlreadyStarted(Exception):
@@ -53,16 +51,15 @@ class BaseStateBackend:
         """Give an entity its first state and log it; raise ``AlreadyStarted`` if it has one."""
         raise NotImplementedError("subclasses of BaseStateBackend must override start()")
 
-    def move(self, move: Move, version: int) -> Move:
-        """Apply ``move`` if the entity is still at ``version``, and log it either way.
+    def lock(self, machine: str, entity: str) -> AbstractContextManager[Current | None]:
+        """Hold the entity from read to write: yields its current state, or ``None`` if it
+        hasn't started. A ``move`` made inside commits when the block ends; an exception
+        undoes it."""
+        raise NotImplementedError("subclasses of BaseStateBackend must override lock()")
 
-        Returns the move as logged: applied, or refused because something else moved it first.
-        """
+    def move(self, move: Move) -> Move:
+        """Rewrite the entity's current state and log ``move``; called inside ``lock``."""
         raise NotImplementedError("subclasses of BaseStateBackend must override move()")
-
-    def refuse(self, move: Move) -> Move:
-        """Log a refused move; the current state is untouched."""
-        raise NotImplementedError("subclasses of BaseStateBackend must override refuse()")
 
     # ── Reads ──
 
@@ -79,10 +76,5 @@ class BaseStateBackend:
         raise NotImplementedError("subclasses of BaseStateBackend must override all_current()")
 
     def history(self, machine: str, entity: str) -> list[Move]:
-        """Every move logged for the entity, applied and refused, oldest first."""
+        """Every move logged for the entity, oldest first."""
         raise NotImplementedError("subclasses of BaseStateBackend must override history()")
-
-
-def lost_race(move: Move) -> str:
-    """The reason logged when a move finds the entity no longer at the version it read."""
-    return f"moved by someone else since it was read in {move.from_state}"

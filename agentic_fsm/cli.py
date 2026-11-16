@@ -6,7 +6,7 @@
 
 Each command loads one machine and calls one of its methods, so an agent at the CLI can make
 every move the code can and no other. ``--json`` prints the result as data. The exit code is 0
-for a move applied or "not now", 1 for a move refused, 2 for one that can't be tried.
+for a move made or "not now", 2 for one that can't be made (with the reason on stderr).
 """
 
 import argparse
@@ -22,7 +22,6 @@ from .conf import ENV_PREFIX, settings
 from .machine import Graph, Machine, MachineError, TransitionError
 
 EXIT_OK = 0
-EXIT_REFUSED = 1
 EXIT_ERROR = 2
 
 DJANGO_SETTINGS_ENV = "DJANGO_SETTINGS_MODULE"
@@ -84,8 +83,12 @@ def _parser() -> argparse.ArgumentParser:
     in_place.add_argument("--answer", help="decide in the model's place: a JSON object or a state")
     fire.set_defaults(command=fire_command)
 
-    advance = commands.add_parser("advance", parents=[shared], help="try the steps out of every entity's state")
-    advance.set_defaults(command=advance_command)
+    progress = commands.add_parser("progress", parents=[shared], help="move one entity until it rests")
+    progress.add_argument("entity", help="<machine>:<id>")
+    progress.set_defaults(command=progress_command)
+
+    progress_all = commands.add_parser("progress_all", parents=[shared], help="at most one move for every entity")
+    progress_all.set_defaults(command=progress_all_command)
     return parser
 
 
@@ -178,10 +181,12 @@ def fire_command(machine: Machine, args) -> Result:
     return _move_result(move)
 
 
-def advance_command(machine: Machine, args) -> Result:
-    moves = machine.advance()
-    code = EXIT_OK if all(move.applied for move in moves) else EXIT_REFUSED
-    return Result([asdict(move) for move in moves], "\n\n".join(map(_move_text, moves)), code)
+def progress_command(machine: Machine, args) -> Result:
+    return _moves_result(machine.progress(_entity_id(machine, args.entity)))
+
+
+def progress_all_command(machine: Machine, args) -> Result:
+    return _moves_result(machine.progress_all())
 
 
 def _entity_id(machine: Machine, entity: str) -> str:
@@ -195,7 +200,11 @@ def _entity_id(machine: Machine, entity: str) -> str:
 
 
 def _move_result(move: Move) -> Result:
-    return Result(asdict(move), _move_text(move), EXIT_OK if move.applied else EXIT_REFUSED)
+    return Result(asdict(move), _move_text(move))
+
+
+def _moves_result(moves: list[Move]) -> Result:
+    return Result([asdict(move) for move in moves], "\n\n".join(map(_move_text, moves)) or "nothing moved")
 
 
 # ── Text ──
@@ -222,8 +231,6 @@ def _move_text(move: Move) -> str:
     if move.step is None:
         return f"{entity} started in {move.to_state}"
     line = f"{entity} {move.from_state} -> {move.to_state} by {move.step}, decided by {move.decided_by}"
-    if not move.applied:
-        line = f"refused: {line}\n  {move.reason}"
     details = {k: v for k, v in (move.decision or {}).items() if k != "to"}
     return "\n".join([line, *(f"  {k}: {v}" for k, v in details.items())])
 

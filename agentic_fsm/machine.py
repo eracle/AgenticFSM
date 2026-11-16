@@ -2,14 +2,15 @@
 
     orders = Machine(Order, TRANSITIONS, load=get_order)
 
-A step is a function of the entity that returns the next state, or ``None`` for "not now", or an
+A step is a function of the entity that returns the next state, or ``None`` for "not now", or a
 ``Decide`` that puts the question to a model. Its allowed targets are the rows it sits on; anything
-else it returns is refused and logged, never applied.
+else it returns is a bug, raised as ``TransitionError`` with nothing written. Every row in the log
+is a move that happened.
 """
 
 from collections import deque
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import cached_property
 
 from .backends import BACKEND_ENV, get_backend
@@ -24,8 +25,9 @@ class MachineError(ValueError):
 
 
 class TransitionError(Exception):
-    """A fire that can't be tried: unknown step, an entity not started, or a step that doesn't
-    leave the entity's state."""
+    """A move that can't be made: unknown step, an entity not started, a step that doesn't leave
+    the entity's state, a result outside the step's rows, or an answer that doesn't validate.
+    Nothing is written."""
 
 
 @dataclass(frozen=True)
@@ -117,7 +119,7 @@ class Machine:
         return self.backend.in_state(self.name, self._member(state).value)
 
     def history(self, entity_id) -> list[Move]:
-        """Every move logged for the entity, applied and refused, oldest first."""
+        """Every move logged for the entity, oldest first."""
         return self.backend.history(self.name, str(entity_id))
 
     # ── Moves ──
@@ -129,16 +131,20 @@ class Machine:
     def fire(self, entity_id, step: Callable | str, *, entity=None, answer=None) -> Move | None:
         """Run one step on one entity: the logged move, or ``None`` if the step said "not now".
 
-        ``entity`` is the entity already in hand, given to the step instead of ``load(id)``: a
-        caller walking its own rows, or one that has set on the entity what it chose for the
-        step. ``answer`` decides a ``Decide`` step in the model's place: its fields as a dict or a JSON
-        object, or a bare state value. No model is called and the prompt function isn't run. An
-        answer the schema or the step's rows don't allow is refused and logged.
+        The entity is locked from the read of its state to the write of the move, so a second
+        caller waits and then reads the state this one left. ``entity`` is the entity already in
+        hand, given to the step instead of ``load(id)``: a caller walking its own rows, or one
+        that has set on the entity what it chose for the step. ``answer`` decides a ``Decide``
+        step in the model's place: its fields as a dict or a JSON object, or a bare state value.
+        No model is called and the prompt function isn't run. An answer the schema or the
+        step's rows don't allow raises ``TransitionError`` with the reason, and nothing is written.
         """
-        current, state, exit_ = self._exit_for(entity_id, step)
-        if answer is not None:
-            return self._answer(current, state, exit_, answer)
-        return self._try(current, state, exit_, self._entity(current, entity))
+        step = self._resolve_step(step)
+        with self.backend.lock(self.name, str(entity_id)) as current:
+            state, exit_ = self._exit_from(entity_id, current, step)
+            if answer is not None:
+                return self._answer(current, state, exit_, answer)
+            return self._try(current, state, exit_, self._entity(current, entity))
 
     def brief(self, entity_id, step: Callable | str, *, entity=None) -> Brief:
         """What a ``Decide`` step would give the model for this entity, for a session to decide instead.
@@ -147,30 +153,57 @@ class Machine:
         the answer's JSON Schema and the agent's tools. Answer it with ``fire(..., answer=)``.
         ``entity`` is as for ``fire``.
         """
-        current, state, exit_ = self._exit_for(entity_id, step)
+        step = self._resolve_step(step)
+        current = self.backend.current(self.name, str(entity_id))
+        state, exit_ = self._exit_from(entity_id, current, step)
         if not isinstance(exit_.step, Decide):
             raise TransitionError(f"{_step_name(exit_.step)} is code, not a Decide: there is nothing to brief")
         return exit_.step.brief(self._entity(current, entity), exit_.targets)
 
-    def advance(self) -> list[Move]:
+    def progress(self, entity_id) -> list[Move]:
+        """Move one entity until it rests; returns the moves made, oldest first.
+
+        Each round tries the steps out of the entity's state in list order, as ``progress_all``
+        does, on the entity loaded afresh, and commits its move. It rests when no step moves it
+        (a final state, or every step says "not now"), and stops after a move that brings it back
+        to a state this call already left, so it makes at most as many moves as there are states.
+        """
+        entity_id = str(entity_id)
+        if self.backend.current(self.name, entity_id) is None:
+            raise TransitionError(f"{self.name}:{entity_id} hasn't started")
+        moves, left = [], set()
+        while (move := self._one_move(entity_id)) is not None:
+            moves.append(move)
+            left.add(move.from_state)
+            if move.to_state in left:
+                break
+        return moves
+
+    def progress_all(self) -> list[Move]:
         """Try the steps out of each non-final entity's state, in list order.
 
         The first step that doesn't return ``None`` decides, so each entity makes at most one move
-        per call. Returns the moves logged, applied and refused.
+        per call. Each entity is locked and committed on its own. Returns the moves made.
         """
         moves = []
         for current in self.backend.all_current(self.name):
+            if self._exits.get(self._state(current)):
+                move = self._one_move(current.entity)
+                if move is not None:
+                    moves.append(move)
+        return moves
+
+    def _one_move(self, entity_id: str) -> Move | None:
+        """Under the entity's lock, the first move a step out of its state makes, if any."""
+        with self.backend.lock(self.name, entity_id) as current:
             state = self._state(current)
             exits = self._exits.get(state, {}).values()
-            if not exits:
-                continue
-            entity = self.load(current.entity)
+            entity = self.load(current.entity) if exits else None
             for exit_ in exits:
                 move = self._try(current, state, exit_, entity)
                 if move is not None:
-                    moves.append(move)
-                    break
-        return moves
+                    return move
+        return None
 
     def _try(self, current: Current, state: States, exit_: _Exit, entity) -> Move | None:
         if isinstance(exit_.step, Decide):
@@ -179,70 +212,62 @@ class Machine:
             result, decided_by = exit_.step(entity), "code"
         if result is None:
             return None
-        return self._log(current, state, exit_, result, decided_by)
+        return self._apply(current, state, exit_, result, decided_by)
 
     def _answer(self, current: Current, state: States, exit_: _Exit, answer) -> Move:
-        """Apply an answer given in the model's place, or log why it can't be."""
+        """Apply an answer given in the model's place; raise with the reason if it can't be."""
         step = exit_.step
         if not isinstance(step, Decide):
             raise TransitionError(f"{_step_name(step)} is code, not a Decide: it takes no answer")
-        fields = answer_fields(answer)
         try:
-            decision = step.parse(fields, exit_.targets)
+            decision = step.parse(answer_fields(answer), exit_.targets)
         except ValueError as error:
-            refused = self._move(current, state, exit_, fields.get("to"), "agent", fields)
-            return self.backend.refuse(replace(refused, applied=False, reason=str(error)))
-        return self._log(current, state, exit_, decision, "agent")
+            raise TransitionError(f"the answer to {step.name} doesn't validate: {error}") from None
+        return self._apply(current, state, exit_, decision, "agent")
 
-    def _log(self, current: Current, state: States, exit_: _Exit, result, decided_by: str) -> Move:
-        """Apply a step's result if its rows allow it, and log it either way."""
+    def _apply(self, current: Current, state: States, exit_: _Exit, result, decided_by: str) -> Move:
+        """Write a step's result as a move; a result outside its rows is a bug and raises."""
         decided = isinstance(result, Decision)
-        decision = result.model_dump(mode="json") if decided else None
         target = result.to if decided else result
-        move = self._move(current, state, exit_, target, decided_by, decision)
-        refusal = self._refusal(state, exit_, target)
-        if refusal:
-            return self.backend.refuse(replace(move, applied=False, reason=refusal))
-        return self.backend.move(move, current.version)
-
-    def _move(self, current: Current, state: States, exit_: _Exit, target, decided_by, decision) -> Move:
-        return Move(
-            machine=self.name,
-            entity=current.entity,
-            step=_step_name(exit_.step),
-            from_state=state.value,
-            to_state=_stored(target),
-            applied=True,
-            decided_by=decided_by,
-            at=utc_now(),
-            decision=decision,
+        self._check_target(state, exit_, target)
+        return self.backend.move(
+            Move(
+                machine=self.name,
+                entity=current.entity,
+                step=_step_name(exit_.step),
+                from_state=state.value,
+                to_state=target.value,
+                decided_by=decided_by,
+                at=utc_now(),
+                decision=result.model_dump(mode="json") if decided else None,
+            )
         )
 
-    def _refusal(self, state: States, exit_: _Exit, result) -> str | None:
-        if not isinstance(result, self.states):
-            return f"{result!r} is not a state of {self.states.__name__}"
-        if result not in exit_.targets:
+    def _check_target(self, state: States, exit_: _Exit, target):
+        if not isinstance(target, self.states):
+            raise TransitionError(
+                f"{_step_name(exit_.step)} returned {target!r}, which is not a state of {self.states.__name__}"
+            )
+        if target not in exit_.targets:
             allowed = ", ".join(t.value for t in exit_.targets)
-            return f"{_step_name(exit_.step)} may move {state.value} only to {allowed}"
-        return None
+            raise TransitionError(
+                f"{_step_name(exit_.step)} returned {target.value}, but may move {state.value} only to {allowed}"
+            )
 
     # ── Lookups ──
 
     def _entity(self, current: Current, entity):
         return self.load(current.entity) if entity is None else entity
 
-    def _exit_for(self, entity_id, step: Callable | str) -> tuple[Current, States, _Exit]:
-        """The entity's current row, its state, and the step's exit from it; raises if there's none."""
-        step = self._resolve_step(step)
-        entity_id = str(entity_id)
-        current = self.backend.current(self.name, entity_id)
+    def _exit_from(self, entity_id, current: Current | None, step: Callable) -> tuple[States, _Exit]:
+        """The entity's state and the step's exit from it; raises if there's none."""
         if current is None:
             raise TransitionError(f"{self.name}:{entity_id} hasn't started")
         state = self._state(current)
         exit_ = self._exits.get(state, {}).get(_step_name(step))
         if exit_ is None:
             raise TransitionError(f"{_step_name(step)} doesn't leave {state.value}")
-        return current, state, exit_
+        return state, exit_
 
     def _resolve_step(self, step: Callable | str) -> Callable:
         name = step if isinstance(step, str) else _step_name(step)
@@ -368,11 +393,5 @@ def _check_all_reachable(states: type[States], initial: States, exits):
 
 def _step_name(step) -> str:
     return step.name if isinstance(step, Decide) else step.__name__
-
-
-def _stored(result) -> str:
-    if isinstance(result, States):
-        return result.value
-    return (result if isinstance(result, str) else repr(result))[:255]
 
 

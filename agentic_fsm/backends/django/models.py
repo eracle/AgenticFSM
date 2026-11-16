@@ -4,17 +4,15 @@ from django.db import models
 
 
 class LogEntry(models.Model):
-    """One move, applied or refused. Rows are appended and never changed."""
+    """One move that happened. Rows are appended and never changed."""
 
     machine = models.CharField(max_length=100)
     entity = models.CharField(max_length=255)
     step = models.CharField(max_length=255, null=True)
     from_state = models.CharField(max_length=255, null=True)
     to_state = models.CharField(max_length=255)
-    applied = models.BooleanField()
     decided_by = models.CharField(max_length=255)
     decision = models.JSONField(null=True)
-    reason = models.TextField(null=True)
     at = models.DateTimeField()
 
     class Meta:
@@ -25,12 +23,11 @@ class LogEntry(models.Model):
 
 
 class CurrentState(models.Model):
-    """Where one entity is now. ``version`` counts its moves, for compare-and-set."""
+    """Where one entity is now. A fire locks this row from read to write."""
 
     machine = models.CharField(max_length=100)
     entity = models.CharField(max_length=255)
     state = models.CharField(max_length=255)
-    version = models.PositiveIntegerField()
     updated_at = models.DateTimeField()
 
     class Meta:

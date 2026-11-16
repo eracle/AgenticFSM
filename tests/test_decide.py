@@ -84,7 +84,7 @@ def test_a_decide_moves_the_entity_and_logs_the_decision(backend, table):
 
     move = orders.fire(1, "read_message")
 
-    assert (move.step, move.from_state, move.to_state, move.applied) == ("read_message", "placed", "confirmed", True)
+    assert (move.step, move.from_state, move.to_state) == ("read_message", "placed", "confirmed")
     assert move.decided_by == "llm:test:test"
     assert move.decision == {"to": "confirmed", "reason": "They said yes"}
     assert orders.state_of(1) is Order.confirmed
@@ -154,14 +154,14 @@ def test_the_entity_reaches_the_agents_tools_as_deps(backend, table):
     assert seen == [table["1"]]
 
 
-def test_advance_runs_a_decide_like_any_step(backend, table):
+def test_progress_all_runs_a_decide_like_any_step(backend, table):
     orders = machine_with(backend, table, reader(model_saying(to="cancelled", reason="Changed their mind")))
     table["1"] = new_order(message="Cancel it")
     table["2"] = new_order()
     orders.start(1)
     orders.start(2)
 
-    moves = orders.advance()
+    moves = orders.progress_all()
 
     assert [(m.entity, m.step, m.to_state) for m in moves] == [("1", "read_message", "cancelled")]
 
@@ -197,22 +197,23 @@ def decided_in_code(backend, table, to):
     orders = machine_with(backend, table, read_message)
     table["1"] = new_order()
     orders.start(1)
-    return orders, orders.fire(1, read_message)
+    return orders, read_message
 
 
 def test_a_code_step_may_return_a_decision(backend, table):
-    orders, move = decided_in_code(backend, table, Order.cancelled)
-    assert move.applied and move.decided_by == "code"
+    orders, read_message = decided_in_code(backend, table, Order.cancelled)
+    move = orders.fire(1, read_message)
+    assert move.decided_by == "code"
     assert move.decision == {"to": "cancelled", "reason": "A rule matched"}
     assert orders.state_of(1) is Order.cancelled
 
 
-def test_a_decision_outside_the_steps_rows_is_refused_and_logged(backend, table):
-    orders, move = decided_in_code(backend, table, Order.shipped)
-    assert not move.applied
-    assert move.reason == "read_message may move placed only to confirmed, cancelled"
-    assert move.decision == {"to": "shipped", "reason": "A rule matched"}
+def test_a_decision_outside_the_steps_rows_raises_and_writes_nothing(backend, table):
+    orders, read_message = decided_in_code(backend, table, Order.shipped)
+    with pytest.raises(TransitionError, match="may move placed only to confirmed, cancelled"):
+        orders.fire(1, read_message)
     assert orders.state_of(1) is Order.placed
+    assert len(orders.history(1)) == 1
 
 
 # ── A session answers in the model's place ──
@@ -239,29 +240,28 @@ def unreachable(backend, table):
 def test_an_answer_is_applied_without_a_model_or_the_prompt(unreachable, answer):
     move = unreachable.fire(1, "read_message", answer=answer)
 
-    assert move.applied and move.to_state == "confirmed"
+    assert move.to_state == "confirmed"
     assert move.decided_by == "agent"
     assert move.decision == {"to": "confirmed", "reason": "They said yes"}
     assert unreachable.state_of(1) is Order.confirmed
 
 
 @pytest.mark.parametrize(
-    ("answer", "to_state", "reason"),
+    ("answer", "reason"),
     [
-        ({"to": "shipped", "reason": "-"}, "shipped", "to: Input should be"),
-        ({"to": "confirmed"}, "confirmed", "reason: Field required"),
-        ("confirmed", "confirmed", "reason: Field required"),
-        ({"reason": "-"}, "None", "to: Field required"),
+        ({"to": "shipped", "reason": "-"}, "to: Input should be"),
+        ({"to": "confirmed"}, "reason: Field required"),
+        ("confirmed", "reason: Field required"),
+        ({"reason": "-"}, "to: Field required"),
     ],
 )
-def test_an_answer_the_schema_or_the_rows_do_not_allow_is_refused_and_logged(unreachable, answer, to_state, reason):
-    move = unreachable.fire(1, "read_message", answer=answer)
+def test_an_answer_the_schema_or_the_rows_do_not_allow_raises_and_writes_nothing(unreachable, answer, reason):
+    with pytest.raises(TransitionError, match="the answer to read_message doesn't validate") as error:
+        unreachable.fire(1, "read_message", answer=answer)
 
-    assert not move.applied and move.decided_by == "agent"
-    assert move.to_state == to_state
-    assert reason in move.reason
+    assert reason in str(error.value)
     assert unreachable.state_of(1) is Order.placed
-    assert unreachable.history(1)[-1] == move
+    assert len(unreachable.history(1)) == 1
 
 
 def test_a_bare_decision_is_answered_with_a_state_alone(backend, table):
@@ -271,7 +271,7 @@ def test_a_bare_decision_is_answered_with_a_state_alone(backend, table):
 
     move = orders.fire(1, "read_message", answer="cancelled")
 
-    assert move.applied and move.decision == {"to": "cancelled"}
+    assert move.decision == {"to": "cancelled"}
     assert orders.state_of(1) is Order.cancelled
 
 

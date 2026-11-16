@@ -1,9 +1,10 @@
 """State kept in this process's memory, for tests. Nothing survives the process."""
 
-from dataclasses import replace
-from threading import Lock
+from collections import defaultdict
+from contextlib import contextmanager
+from threading import Lock, RLock
 
-from ..base.base import AlreadyStarted, BaseStateBackend, Current, Move, lost_race, utc_now
+from ..base.base import AlreadyStarted, BaseStateBackend, Current, Move, utc_now
 
 
 class StateBackend(BaseStateBackend):
@@ -11,30 +12,29 @@ class StateBackend(BaseStateBackend):
         self._log: list[Move] = []
         self._current: dict[tuple[str, str], Current] = {}  # insertion order is start order
         self._lock = Lock()
+        self._entity_locks: defaultdict[tuple[str, str], RLock] = defaultdict(RLock)
 
     # ── Writes ──
 
     def start(self, machine, entity, state):
-        move = Move(machine, entity, None, None, state, True, "code", utc_now())
+        move = Move(machine, entity, None, None, state, "code", utc_now())
         with self._lock:
             if (machine, entity) in self._current:
                 raise AlreadyStarted(f"{machine}:{entity} has already started")
-            self._current[machine, entity] = Current(entity, state, 1)
+            self._current[machine, entity] = Current(entity, state)
             self._log.append(move)
         return move
 
-    def move(self, move, version):
-        key = (move.machine, move.entity)
+    @contextmanager
+    def lock(self, machine, entity):
         with self._lock:
-            if self._current[key].version == version:
-                self._current[key] = Current(move.entity, move.to_state, version + 1)
-            else:
-                move = replace(move, applied=False, reason=lost_race(move))
-            self._log.append(move)
-        return move
+            entity_lock = self._entity_locks[machine, entity]
+        with entity_lock:
+            yield self.current(machine, entity)
 
-    def refuse(self, move):
+    def move(self, move):
         with self._lock:
+            self._current[move.machine, move.entity] = Current(move.entity, move.to_state)
             self._log.append(move)
         return move
 

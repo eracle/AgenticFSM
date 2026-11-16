@@ -46,15 +46,20 @@ by whoever knows something new. A machine is three plain Python things.
 | `fire(id, step, entity=)` | the same, on the entity already in hand instead of `load(id)` (`brief` takes it too) |
 | `fire(id, step, answer=)` | decides a `Decide` in the model's place; no model call, the prompt doesn't run |
 | `brief(id, step)` | the `Brief` a `Decide` would give the model: instructions, prompt, choices, schema, tools |
-| `advance()` | per unfinished entity, tries the steps out of its state in list order and stops at the first that doesn't return `None`: at most one move per entity per call |
+| `progress(id)` | moves one entity until it rests: each round tries the steps out of its state in list order on the entity loaded afresh, and commits its move; it stops when no step moves it, or after a move back to a state this call already left |
+| `progress_all()` | per unfinished entity, tries the steps out of its state in list order and stops at the first that doesn't return `None`: at most one move per entity per call, each entity locked and committed on its own |
 | `state_of(id)`, `in_state(state)`, `history(id)` | reads |
 | `graph()` | states and rows as data |
 
-A result outside the step's rows, or one that isn't a state, is logged as a refused `Move`
-(`applied=False`, with a `reason`) and never applied. `fire` raises `TransitionError` when the
-move can't even be tried (unknown step, entity not started, step doesn't leave the state). Entity
-ids are stored as text, so `load` receives a string. The machine never opens a transaction around
-a step: a step may send an email or call a model.
+**Every row in the log is a move that happened.** `fire` raises `TransitionError` and writes
+nothing when the move can't be made: an unknown step, an entity not started, a step that doesn't
+leave the state, a result outside the step's rows or not a state at all (a bug in the step), an
+answer that doesn't validate. Entity ids are stored as text, so `load` receives a string.
+
+**The entity is locked from read to write.** `fire` (and each round of `progress` and
+`progress_all`) runs inside the backend's `lock(machine, entity)`: it reads the current state,
+runs the step and writes the move there, so a second caller waits and reads the state the first
+left. A step that raises undoes the move and, on the Django backend, the step's own writes.
 
 ## Decide
 
@@ -70,7 +75,7 @@ its output type, with the model check deferred so no key is needed until it runs
   afterwards either way. A model that keeps answering outside them raises Pydantic AI's
   `UnexpectedModelBehavior`, and nothing is logged.
 - **Answer**: `Decide.parse(answer, targets)` validates a dict, a JSON object or a bare state value
-  against the same narrowed schema. The machine logs an invalid one as a refused move.
+  against the same narrowed schema. The machine raises `TransitionError` on an invalid one.
 - **Logged**: `decided_by` is `llm:<provider>:<model>` for a run, `agent` for an answer and
   `code` for a function, and `Move.decision` holds the whole `Decision`.
 - `Brief.instructions` and `Brief.tools` read the agent's plain-text instructions (a private
@@ -86,8 +91,9 @@ reaching a real model.
 nothing else. It adds no behaviour: each command loads the machine (`--machine
 package.module:name`, or the `MACHINE` setting) and calls one `Machine` method, `show` →
 `graph()`, `start`, `list` → `in_state`, `fire` → `fire` / `brief` (`--agent`) /
-`fire(answer=)` (`--answer`), `advance`. Each command returns a `Result` (the data for `--json`,
-the text, the exit code: 0 applied or "not now", 1 refused, 2 can't be tried).
+`fire(answer=)` (`--answer`), `progress`, `progress_all`. Each command returns a `Result` (the
+data for `--json`, the text, the exit code: 0 a move made or "not now", 2 one that can't be made,
+with the reason on stderr).
 
 - An entity is `<machine name>:<id>`, checked against the loaded machine; a state given to
   `list` is its stored value.
@@ -118,16 +124,21 @@ a `base` module holding a `StateBackend`, picked by the package's dotted path (t
 setting, e.g. `AGENTIC_FSM_BACKEND=agentic_fsm.backends.django`, or `Machine(..., backend=)`; a
 machine with neither raises). `backends/__init__.py:get_backend` imports `<path>.base` on first use.
 
-- `backends/base/base.py`: `BaseStateBackend` (seven calls: `start`, `move`, `refuse`, `current`,
+- `backends/base/base.py`: `BaseStateBackend` (seven calls: `start`, `lock`, `move`, `current`,
   `in_state`, `all_current`, `history`), plus the `Move` and `Current` dataclasses.
-- `backends/locmem/`: in memory, for tests.
+- `backends/locmem/`: in memory, for tests; `lock` is a per-entity `RLock`.
 - `backends/django/`: a Django app (`INSTALLED_APPS = ["agentic_fsm.backends.django"]`, label
   `agentic_fsm`) with two models, `LogEntry` (append-only) and `CurrentState` (one row per
-  entity, with a `version`), and their migration. It's the only place Django is imported.
+  entity), and their migrations. `lock` is `transaction.atomic()` around a `select_for_update`
+  of the entity's current-state row; SQLite ignores the row lock. It's the only place Django is
+  imported.
 
-Every backend keeps the same two things and the same rule: a move rewrites the entity's
-current-state row and appends its log row in one transaction, and only if the entity's version is
-still the one read before the step ran. A move that finds another version is logged as refused.
+Every backend keeps the same two things and the same rule: `move`, called inside `lock`,
+rewrites the entity's current-state row and appends its log row, and both commit when the lock
+is released.
+
+`0002_only_real_moves` deleted the refused log rows and dropped `applied`, `reason` and
+`version`. An app whose migration writes those columns through the historical models declares `run_before = [("agentic_fsm", "0002_only_real_moves")]`.
 
 ## Tests
 
