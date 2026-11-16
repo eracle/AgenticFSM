@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Entity lifecycles declared once and advanced the same way by code, a model or an agent."
 readme = "README.md"
 requires-python = ">=3.12"
-license = "GPL-3.0-or-later"
+license = "Apache-2.0"
 license-files = ["LICENCE.md"]
 authors = [{ name = "OpenOutreach", email = "hello@openoutreach.app" }]
 keywords = [
@@ -23,7 +23,7 @@ keywords = [
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",

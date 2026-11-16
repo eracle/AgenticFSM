@@ -220,4 +220,4 @@ pytest
 
 ## Licence
 
-GPL-3.0-or-later. See `LICENCE.md`.
+Apache-2.0. See `LICENCE.md`.
