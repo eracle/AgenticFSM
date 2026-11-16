@@ -43,11 +43,11 @@ django = [
     "Django>=6.1",
 ]
 sqlalchemy = [
-    "SQLAlchemy>=2.1.8",
+    "SQLAlchemy>=2.0.54",
 ]
 dev = [
     "Django>=6.1",
-    "SQLAlchemy>=2.1.8",
+    "SQLAlchemy>=2.0.54",
     "psycopg[binary]>=3.3.9",
     "pytest>=9.2",
     "pytest-django>=4.14",
