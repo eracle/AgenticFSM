@@ -33,6 +33,8 @@ by whoever knows something new. A machine is three plain Python things.
   keep their description and kind. The description is required; it's the state's definition.
 - **Steps**: a named function of the entity that returns the next state (or a `Decision`), or
   `None` for "not now"; or a `Decide`, which puts the question to a model (see *Decide*).
+  `@check` (`machine.py`) marks a function step that only reads, so `due` may run it; it sets
+  an attribute on the function and refuses a `Decide`.
 - **Transitions**: one list of `(from, to, step)` rows; `from` may be a tuple. A step's allowed
   targets out of a state are the rows it sits on there.
 
@@ -42,12 +44,14 @@ by whoever knows something new. A machine is three plain Python things.
 | Call | Does |
 |---|---|
 | `start(id)` | puts an entity in the initial state; `AlreadyStarted` if it has one |
+| `start_all(ids)` | starts each id with no state yet (one `all_current` read, then a `start` each; a rival's `AlreadyStarted` is skipped), for entities another program makes |
 | `fire(id, step)` | runs one step (the function, the `Decide` or its name); returns the logged `Move`, or `None` for "not now" |
 | `fire(id, step, entity=)` | the same, on the entity already in hand instead of `load(id)` (`brief` takes it too) |
 | `fire(id, step, answer=)` | decides a `Decide` in the model's place; no model call, the prompt doesn't run |
 | `brief(id, step)` | the `Brief` a `Decide` would give the model: instructions, prompt, choices, schema, tools |
 | `progress(id)` | moves one entity until it rests: each round tries the steps out of its state in list order on the entity loaded afresh, and commits its move; it stops when no step moves it, or after a move back to a state this call already left |
-| `progress_all()` | per unfinished entity, tries the steps out of its state in list order and stops at the first that doesn't return `None`: at most one move per entity per call, each entity locked and committed on its own |
+| `progress_all()` | per unfinished entity, tries the steps out of its state in list order and stops at the first that doesn't return `None`: at most one move per entity per call, each entity locked and committed on its own. An entity that raises is recorded and the rest tried; then `ProgressError(moves, failures)` |
+| `due()` | the unfinished entities a step could move now, writing nothing: under each entity's lock, steps in list order, a `@check` step runs, any other step makes the entity due untried |
 | `state_of(id)`, `in_state(state)`, `history(id)` | reads |
 | `graph()` | states and rows as data |
 
@@ -90,8 +94,9 @@ reaching a real model.
 `cli.py` is the console script `agfsm` (`main(argv)` returns the exit code), on `argparse` and
 nothing else. It adds no behaviour: each command loads the machine (`--machine
 package.module:name`, or the `MACHINE` setting) and calls one `Machine` method, `show` →
-`graph()`, `start`, `list` → `in_state`, `fire` → `fire` / `brief` (`--agent`) /
-`fire(answer=)` (`--answer`), `progress`, `progress_all`. Each command returns a `Result` (the
+`graph()`, `start`, `list` → `in_state`, `due`, `fire` → `fire` / `brief` (`--agent`) /
+`fire(answer=)` (`--answer`), `progress`, `progress_all` (on `ProgressError`: the moves on
+stdout, each failure on stderr, exit 2). Each command returns a `Result` (the
 data for `--json`, the text, the exit code: 0 a move made or "not now", 2 one that can't be made,
 with the reason on stderr).
 
@@ -100,8 +105,10 @@ with the reason on stderr).
 - `--machine` and `--json` go before or after the command: the subcommands' copies default to
   `argparse.SUPPRESS` so they don't erase one given before.
 - The working directory goes on `sys.path`, as `python -m` would put it.
-- With `DJANGO_SETTINGS_MODULE` set, `backends/django/project.py:setup_project` runs before the
-  machine's module is imported, since that module usually imports the project's models.
+- With `DJANGO_SETTINGS_MODULE` set, and Django and that settings module both installed
+  (`find_spec`), `backends/django/project.py:setup_project` runs before the machine's module is
+  imported, since that module usually imports the project's models. A variable set for another
+  program in a shared environment is left alone.
 - Pydantic AI's first-run banner goes to stderr, and never for a run an installed package
   starts, so `--json` output stays clean.
 
@@ -134,8 +141,10 @@ machine with neither raises). `backends/__init__.py:get_backend` imports `<path>
   imported.
 - `backends/sqlalchemy/`: the same two tables as SQLAlchemy `Table`s (`tables.py`; names,
   columns, indexes and constraint match the Django models, and `test_backend_sqlalchemy.py`
-  checks it), so the two backends share one database. `StateBackend(engine=None)` falls back to
-  one cached engine per `SQLALCHEMY_URL`; `create_tables()` makes what's missing. `lock` is
+  checks it), so the two backends share one database. `StateBackend(engine=None)` takes an
+  engine, a function returning one, or nothing for one cached engine per `SQLALCHEMY_URL`; the
+  last two resolve on first use (`engine` is a `cached_property`), so a module-level machine
+  imports with no database configured. `create_tables()` makes what's missing. `lock` is
   `engine.begin()` around a `SELECT ... FOR UPDATE`, and the open connection sits in a
   `ContextVar` keyed by engine: `connection()` hands it to a step so its writes commit with the
   move, a lock inside it takes a savepoint, and reads inside it go through it. `UTCDateTime`

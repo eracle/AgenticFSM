@@ -143,12 +143,31 @@ def test_the_backend_connects_to_the_sqlalchemy_url_setting(tmp_path, monkeypatc
         assert connection.execute(select(current_state.c.state)).scalars().all() == ["pending"]
 
 
-def test_the_backend_without_an_engine_or_url_is_refused(monkeypatch):
+def test_the_backend_without_an_engine_or_url_is_refused_on_first_use(monkeypatch):
     monkeypatch.delenv("AGENTIC_FSM_SQLALCHEMY_URL", raising=False)
     assert settings.SQLALCHEMY_URL is None
+    backend = StateBackend()  # a machine declared at import builds this before any URL is set
 
     with pytest.raises(LookupError, match="AGENTIC_FSM_SQLALCHEMY_URL"):
-        StateBackend()
+        backend.engine
+
+
+def test_an_engine_function_is_called_once_on_first_use(tmp_path):
+    calls = []
+
+    def make_engine():
+        calls.append(1)
+        return create_engine(f"sqlite:///{tmp_path / 'state.sqlite3'}")
+
+    backend = StateBackend(make_engine)
+    orders = Machine(Order, TRANSITIONS, load=dict().get, backend=backend)
+    assert calls == []
+
+    backend.create_tables()
+    orders.start(1)
+
+    assert orders.state_of(1) is Order.pending
+    assert calls == [1]
 
 
 # ── The row lock, on Postgres ──

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from functools import cached_property
 
 from .backends import BACKEND_ENV, get_backend
-from .backends.base.base import BaseStateBackend, Current, Move, utc_now
+from .backends.base.base import AlreadyStarted, BaseStateBackend, Current, Move, utc_now
 from .conf import settings
 from .decide import Brief, Decide, Decision, answer_fields
 from .states import States
@@ -28,6 +28,39 @@ class TransitionError(Exception):
     """A move that can't be made: unknown step, an entity not started, a step that doesn't leave
     the entity's state, a result outside the step's rows, or an answer that doesn't validate.
     Nothing is written."""
+
+
+class ProgressError(Exception):
+    """``progress_all`` moved every entity it could, and some entities' steps raised.
+
+    ``moves`` are the moves made, each committed; ``failures`` maps each entity that raised to
+    its exception. A failed entity's move, and its step's own writes, were undone.
+    """
+
+    def __init__(self, moves: list[Move], failures: dict[str, Exception]):
+        self.moves = moves
+        self.failures = failures
+        listed = "; ".join(f"{entity}: {type(error).__name__}: {error}" for entity, error in failures.items())
+        super().__init__(f"{len(failures)} of the entities raised, {len(moves)} moved: {listed}")
+
+
+CHECK_ATTRIBUTE = "agentic_fsm_check"
+
+
+def check(step: Callable) -> Callable:
+    """Mark a code step as a check: it only reads the entity, so ``Machine.due`` may run it.
+
+    Used as a decorator. A ``Decide`` can't be one: running it calls a model.
+    """
+    if isinstance(step, Decide) or not callable(step):
+        raise TypeError(f"{step!r} can't be a check: only a code step that only reads can")
+    setattr(step, CHECK_ATTRIBUTE, True)
+    return step
+
+
+def is_check(step: Callable) -> bool:
+    """Whether ``step`` was marked with ``check``."""
+    return getattr(step, CHECK_ATTRIBUTE, False) is True
 
 
 @dataclass(frozen=True)
@@ -128,6 +161,25 @@ class Machine:
         """Put an entity in the initial state. Raises ``AlreadyStarted`` if it has a state."""
         return self.backend.start(self.name, str(entity_id), self.initial.value)
 
+    def start_all(self, entity_ids: Iterable) -> list[Move]:
+        """Start each of ``entity_ids`` that has no state yet; returns the moves made, in order.
+
+        For entities made elsewhere (rows another program inserts), started by whoever runs the
+        machine: hand it every id there is, and the ones already started are left alone. An id
+        another caller starts first is skipped.
+        """
+        started = {current.entity for current in self.backend.all_current(self.name)}
+        moves = []
+        for entity_id in map(str, entity_ids):
+            if entity_id in started:
+                continue
+            started.add(entity_id)
+            try:
+                moves.append(self.start(entity_id))
+            except AlreadyStarted:
+                continue
+        return moves
+
     def fire(self, entity_id, step: Callable | str, *, entity=None, answer=None) -> Move | None:
         """Run one step on one entity: the logged move, or ``None`` if the step said "not now".
 
@@ -184,14 +236,52 @@ class Machine:
 
         The first step that doesn't return ``None`` decides, so each entity makes at most one move
         per call. Each entity is locked and committed on its own. Returns the moves made.
+
+        An entity whose step raises doesn't hold the others: its move is undone, the rest are
+        tried, and ``ProgressError`` is raised at the end with the moves made and each failure.
         """
-        moves = []
+        moves, failures = [], {}
         for current in self.backend.all_current(self.name):
-            if self._exits.get(self._state(current)):
+            try:
+                if not self._exits.get(self._state(current)):
+                    continue
                 move = self._one_move(current.entity)
-                if move is not None:
-                    moves.append(move)
+            except Exception as error:
+                failures[current.entity] = error
+                continue
+            if move is not None:
+                moves.append(move)
+        if failures:
+            raise ProgressError(moves, failures)
         return moves
+
+    def due(self) -> list[str]:
+        """The unfinished entities a step could move now; nothing is moved or written.
+
+        For a scheduler deciding whether a run is worth starting. Each entity is tried as
+        ``progress_all`` would try it, under its lock: a ``check`` step runs and says whether it
+        would move the entity; any other step (an outside effect, a ``Decide``) can't be tried
+        without its effect, so an entity it leaves is due once the checks before it say "not
+        now". Returns the entity ids, oldest first.
+        """
+        return [
+            current.entity
+            for current in self.backend.all_current(self.name)
+            if self._exits.get(self._state(current)) and self._would_move(current.entity)
+        ]
+
+    def _would_move(self, entity_id: str) -> bool:
+        """Under the entity's lock, whether the first step to answer would move it."""
+        with self.backend.lock(self.name, entity_id) as current:
+            entity, loaded = None, False
+            for exit_ in self._exits[self._state(current)].values():
+                if not is_check(exit_.step):
+                    return True
+                if not loaded:
+                    entity, loaded = self.load(current.entity), True
+                if exit_.step(entity) is not None:
+                    return True
+        return False
 
     def _one_move(self, entity_id: str) -> Move | None:
         """Under the entity's lock, the first move a step out of its state makes, if any."""

@@ -245,6 +245,54 @@ def test_a_step_outside_its_rows_is_an_error_and_writes_nothing(capsys, backend,
     assert machine.state_of(1).value == "paid"
 
 
+def test_due_lists_what_a_step_could_move_and_moves_nothing(capsys, backend, table, monkeypatch):
+    from .conftest import Order
+    from .test_machine_moves import CHECKED
+
+    machine = Machine(Order, CHECKED, load=lambda order_id: table[order_id], backend=backend)
+    monkeypatch.setattr(machines, "orders", machine)
+    table["1"] = new_order(payment_cleared=True)
+    table["2"] = new_order()
+    machine.start_all([1, 2])
+
+    code, out, _ = run(capsys, *ORDERS, "due")
+
+    assert code == EXIT_OK
+    assert out.strip() == "order:1"
+    assert machine.in_state(Order.pending) == ["1", "2"]
+
+
+def test_a_django_settings_module_not_installed_here_is_left_alone(capsys, cli_orders, monkeypatch):
+    """A container that also runs a Django tool sets the variable for it, not for this machine."""
+    monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "some_other_tool.settings")
+
+    code, out, _ = run(capsys, *ORDERS, "show")
+
+    assert code == EXIT_OK
+    assert out.startswith("order\n")
+
+
+def test_progress_all_prints_the_moves_made_beside_a_failure(capsys, backend, table, monkeypatch):
+    from .conftest import TRANSITIONS, Order
+
+    def payment_cleared(order):
+        if order.payment_cleared == "provider down":
+            raise RuntimeError("the payment provider is down")
+        return Order.paid
+
+    rows = [TRANSITIONS[0], (Order.pending, Order.paid, payment_cleared), *TRANSITIONS[2:]]
+    machine = Machine(Order, rows, load=lambda order_id: table[order_id], backend=backend)
+    monkeypatch.setattr(machines, "orders", machine)
+    table["1"], table["2"] = new_order(payment_cleared="provider down"), new_order()
+    machine.start_all([1, 2])
+
+    code, out, err = run(capsys, *ORDERS, "progress_all")
+
+    assert code == EXIT_ERROR
+    assert out.strip() == "order:2 pending -> paid by payment_cleared, decided by code"
+    assert err.strip() == "agfsm: order:1: RuntimeError: the payment provider is down"
+
+
 # ── A Decide at the CLI ──
 
 

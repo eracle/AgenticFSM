@@ -145,12 +145,14 @@ reason; nothing is written, and the session answers again.
 | Call | Does |
 |---|---|
 | `orders.start(42)` | puts an entity in the initial state |
+| `orders.start_all(order_ids)` | starts each of the ids that has no state yet |
 | `orders.fire(42, payment_cleared)` | runs one step on one entity |
 | `orders.fire(42, payment_cleared, entity=order)` | the same, on the order already in hand instead of `load(42)` |
 | `orders.fire(42, "read_message", answer=...)` | decides a `Decide` step in the model's place |
 | `orders.brief(42, "read_message")` | what a `Decide` step would give the model |
 | `orders.progress(42)` | moves one entity until it rests |
 | `orders.progress_all()` | tries the steps out of each unfinished entity's state: at most one move each |
+| `orders.due()` | the ids of the entities a step could move now; moves nothing |
 | `orders.state_of(42)` | the entity's current state |
 | `orders.in_state(Order.paid)` | the ids of the entities in a state |
 | `orders.history(42)` | every move logged for the entity |
@@ -163,7 +165,23 @@ reason; nothing is written, and the session answers again.
 - **`fire` returns the logged `Move`**, or `None` when the step said "not now".
 - **`progress_all` tries steps in list order** and stops at the first that doesn't return
   `None`, so each entity makes at most one move per call. When to call it is up to you: a cron
-  job, a scheduler, a script.
+  job, a scheduler, a script. An entity whose step raises doesn't hold the others: its move is
+  undone, the rest are tried, and `ProgressError` is raised at the end with the moves made
+  (`.moves`) and each entity's exception (`.failures`).
+- **`start_all` is for entities another program makes**: rows a web app inserts, started by
+  whoever runs the machine. Hand it every id there is; the ones already started are left alone.
+- **`due` says whether a run is worth starting.** Mark a step that only reads the entity with
+  `@check`; `due` runs the checks out of each entity's state, under its lock, and writes
+  nothing. A step that isn't a check (it sends an email, or a model decides it) can't be tried
+  without its effect, so an entity it leaves is due once the checks before it say "not now".
+
+  ```python
+  from agentic_fsm import check
+
+  @check
+  def payment_cleared(order):
+      return Order.paid if order.payment_cleared else None
+  ```
 - **`progress` goes on until the entity rests**: a final state, or one whose steps all say "not
   now". It loads the entity afresh after each move, commits each move, and stops after a move
   that brings the entity back to a state it already left, so it never loops.
@@ -183,6 +201,7 @@ code can and no other. Each command calls one of the methods above.
 | `agfsm show [--mermaid]` | `orders.graph()`: the states with their descriptions, then the rows |
 | `agfsm start order:42` | `orders.start(42)` |
 | `agfsm list paid` | `orders.in_state(Order.paid)` |
+| `agfsm due` | `orders.due()` |
 | `agfsm fire order:42 payment_cleared` | `orders.fire(42, "payment_cleared")` |
 | `agfsm fire order:42 read_message --agent` | `orders.brief(42, "read_message")` |
 | `agfsm fire order:42 read_message --answer '{...}'` | `orders.fire(42, "read_message", answer=...)` |
@@ -195,9 +214,11 @@ code can and no other. Each command calls one of the methods above.
 - **`--json`** prints the result as data: the `Move`, `Brief` or `Graph`, with times as ISO text.
 - **The exit code** is 0 for a move made or "not now", 2 for one that can't be made (an unknown
   step, an entity not started, an answer that doesn't validate, no machine), with the reason on
-  stderr.
-- **With `DJANGO_SETTINGS_MODULE` set**, `agfsm` sets the Django project up before it loads the
-  machine, as `manage.py` would.
+  stderr. `progress_all` with an entity whose step raised prints the moves it made, puts each
+  failure on stderr, and exits 2.
+- **With `DJANGO_SETTINGS_MODULE` naming a project installed here**, `agfsm` sets the Django
+  project up before it loads the machine, as `manage.py` would. When Django or that settings
+  module isn't installed (the variable was set for another program), it's left alone.
 
 `--agent` then `--answer` lets a session decide a `Decide` step with no model key: the first prints the
 instructions, the prompt, the choices and the answer's schema; the second applies the answer.
@@ -228,7 +249,9 @@ INSTALLED_APPS = [..., "agentic_fsm.backends.django"]
 It writes through Django's own connection, so wrapping `fire` in `transaction.atomic()` commits
 your rows and the move together.
 
-The SQLAlchemy backend connects to the `SQLALCHEMY_URL` setting, or takes an engine:
+The SQLAlchemy backend connects to the `SQLALCHEMY_URL` setting, or takes an engine, or a
+function that makes one (for a machine declared at import whose database is known only when it
+runs; it's called on first use):
 
 ```python
 from agentic_fsm.backends.sqlalchemy.base import StateBackend

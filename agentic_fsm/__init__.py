@@ -4,7 +4,16 @@ from .backends import get_backend
 from .backends.base.base import AlreadyStarted, BaseStateBackend, Move
 from .conf import settings
 from .decide import Brief, Decide, Decision
-from .machine import Graph, Machine, MachineError, StateInfo, TransitionError
+from .machine import (
+    Graph,
+    Machine,
+    MachineError,
+    ProgressError,
+    StateInfo,
+    TransitionError,
+    check,
+    is_check,
+)
 from .states import FinalState, InitialState, State, States
 
 __all__ = [
@@ -19,10 +28,13 @@ __all__ = [
     "Machine",
     "MachineError",
     "Move",
+    "ProgressError",
     "State",
     "StateInfo",
     "States",
     "TransitionError",
+    "check",
     "get_backend",
+    "is_check",
     "settings",
 ]

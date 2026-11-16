@@ -1,4 +1,5 @@
-"""``start``, ``fire``, ``progress`` and ``progress_all``, run against every state backend."""
+"""``start``, ``start_all``, ``fire``, ``progress``, ``progress_all`` and ``due``, run against
+every state backend."""
 
 from datetime import UTC
 from threading import Event, Thread
@@ -6,7 +7,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from agentic_fsm import AlreadyStarted, Machine, TransitionError, get_backend
+from agentic_fsm import (
+    AlreadyStarted,
+    Decide,
+    Decision,
+    Machine,
+    ProgressError,
+    TransitionError,
+    check,
+    get_backend,
+    is_check,
+)
 from agentic_fsm.backends.locmem.base import StateBackend as LocmemBackend
 
 from .conftest import TRANSITIONS, Order, cancel, carrier_delivered, new_order, payment_cleared, ship
@@ -254,6 +265,79 @@ def test_progress_all_never_loads_a_finished_entity(orders, table):
     assert orders.progress_all() == []
 
 
+def test_an_entity_that_raises_does_not_hold_the_others(backend, table):
+    def payment_cleared(order):
+        if order.payment_cleared == "provider down":
+            raise RuntimeError("the payment provider is down")
+        return Order.paid if order.payment_cleared else None
+
+    rows = [TRANSITIONS[0], (Order.pending, Order.paid, payment_cleared), *TRANSITIONS[2:]]
+    orders = machine_with(backend, table, rows)
+    table["1"], table["2"], table["3"] = new_order(payment_cleared=True), new_order(
+        payment_cleared="provider down"
+    ), new_order(payment_cleared=True)
+    for order_id in (1, 2, 3):
+        orders.start(order_id)
+
+    with pytest.raises(ProgressError) as raised:
+        orders.progress_all()
+
+    assert [(m.entity, m.to_state) for m in raised.value.moves] == [("1", "paid"), ("3", "paid")]
+    assert list(raised.value.failures) == ["2"]
+    assert isinstance(raised.value.failures["2"], RuntimeError)
+    assert "2: RuntimeError: the payment provider is down" in str(raised.value)
+    assert orders.in_state(Order.paid) == ["1", "3"]
+    assert orders.in_state(Order.pending) == ["2"]
+
+
+def test_an_entity_in_a_state_the_machine_no_longer_has_is_a_failure(orders, backend, table):
+    table["1"] = new_order(payment_cleared=True)
+    orders.start(1)
+    backend.start("order", "2", "on_hold")
+
+    with pytest.raises(ProgressError) as raised:
+        orders.progress_all()
+
+    assert [m.entity for m in raised.value.moves] == ["1"]
+    assert isinstance(raised.value.failures["2"], TransitionError)
+
+
+# ── start_all ──
+
+
+def test_start_all_starts_only_the_entities_with_no_state(orders):
+    orders.start(2)
+
+    moves = orders.start_all([1, 2, 3, 1])
+
+    assert [(m.entity, m.to_state) for m in moves] == [("1", "pending"), ("3", "pending")]
+    assert orders.in_state(Order.pending) == ["2", "1", "3"]
+    assert len(orders.history(2)) == 1
+
+
+def test_start_all_leaves_a_moved_entity_where_it_is(orders, table):
+    table["1"] = new_order(payment_cleared=True)
+    orders.start(1)
+    orders.fire(1, payment_cleared)
+
+    assert orders.start_all([1]) == []
+    assert orders.state_of(1) is Order.paid
+
+
+def test_start_all_skips_an_entity_another_caller_started_first(orders, backend, monkeypatch):
+    real_all_current = backend.all_current
+
+    def all_current_then_a_rival_starts(machine):
+        found = real_all_current(machine)
+        backend.start("order", "1", "pending")  # between the read and our start
+        return found
+
+    monkeypatch.setattr(backend, "all_current", all_current_then_a_rival_starts)
+
+    assert [m.entity for m in orders.start_all([1, 2])] == ["2"]
+    assert len(orders.history(1)) == 1
+
+
 # ── progress ──
 
 
@@ -347,3 +431,85 @@ def test_carrier_delivery_finishes_the_order(orders, table):
     assert orders.fire(1, carrier_delivered).to_state == "delivered"
     with pytest.raises(TransitionError, match="carrier_delivered doesn't leave delivered"):
         orders.fire(1, carrier_delivered)
+
+
+# ── due ──
+
+
+@check
+def checked_cancel(order):
+    return Order.cancelled if order.cancel_requested else None
+
+
+@check
+def checked_payment(order):
+    return Order.paid if order.payment_cleared else None
+
+
+def charge_and_ship(order):
+    """An outside effect: due can't try it."""
+    order.charged = True
+    return Order.shipped
+
+
+@check
+def checked_delivery(order):
+    return Order.delivered if order.delivered else None
+
+
+CHECKED = [
+    ((Order.pending, Order.paid), Order.cancelled, checked_cancel),
+    (Order.pending, Order.paid, checked_payment),
+    (Order.paid, Order.shipped, charge_and_ship),
+    (Order.shipped, Order.delivered, checked_delivery),
+]
+
+
+def test_due_runs_the_checks_and_moves_nothing(backend, table):
+    orders = machine_with(backend, table, CHECKED)
+    table["1"] = new_order(payment_cleared=True)
+    table["2"] = new_order()
+    table["3"] = new_order(cancel_requested=True)
+    orders.start_all([1, 2, 3])
+
+    assert orders.due() == ["1", "3"]
+    assert orders.in_state(Order.pending) == ["1", "2", "3"]
+    assert [len(orders.history(order_id)) for order_id in (1, 2, 3)] == [1, 1, 1]
+
+
+def test_an_entity_a_step_that_is_not_a_check_leaves_is_due_untried(backend, table):
+    orders = machine_with(backend, table, CHECKED)
+    table["1"] = new_order(payment_cleared=True)
+    orders.start(1)
+    orders.fire(1, checked_payment)
+
+    assert orders.due() == ["1"]
+    assert not hasattr(table["1"], "charged")
+
+
+def test_a_check_before_an_effect_step_decides_first(backend, table):
+    orders = machine_with(backend, table, CHECKED)
+    table["1"] = new_order(payment_cleared=True)
+    orders.start(1)
+    orders.fire(1, checked_payment)
+    table["1"].cancel_requested = True
+
+    assert orders.due() == ["1"]
+    assert not hasattr(table["1"], "charged")
+
+
+def test_a_finished_entity_is_never_due_nor_loaded(backend, table):
+    orders = machine_with(backend, table, CHECKED)
+    table["1"] = new_order(cancel_requested=True)
+    orders.start(1)
+    orders.fire(1, checked_cancel)
+    del table["1"]  # loading it now would raise
+
+    assert orders.due() == []
+
+
+def test_check_marks_a_code_step_and_refuses_a_decide():
+    assert is_check(checked_payment)
+    assert not is_check(payment_cleared)
+    with pytest.raises(TypeError, match="can't be a check"):
+        check(Decide(name="read", prompt=lambda order: "", schema=Decision))

@@ -16,10 +16,11 @@ import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from importlib import import_module
+from importlib.util import find_spec
 
 from .backends.base.base import AlreadyStarted, Move
 from .conf import ENV_PREFIX, settings
-from .machine import Graph, Machine, MachineError, TransitionError
+from .machine import Graph, Machine, MachineError, ProgressError, TransitionError
 
 EXIT_OK = 0
 EXIT_ERROR = 2
@@ -75,6 +76,9 @@ def _parser() -> argparse.ArgumentParser:
     listing.add_argument("state", help="a state's stored value")
     listing.set_defaults(command=list_command)
 
+    due = commands.add_parser("due", parents=[shared], help="the entities a step could move now")
+    due.set_defaults(command=due_command)
+
     fire = commands.add_parser("fire", parents=[shared], help="run one step on one entity")
     fire.add_argument("entity", help="<machine>:<id>")
     fire.add_argument("step", help="the step's name")
@@ -112,8 +116,9 @@ def _add_common(parser: argparse.ArgumentParser, *, default):
 def load_machine(path: str | None) -> Machine:
     """The ``Machine`` at ``package.module:name``.
 
-    With ``DJANGO_SETTINGS_MODULE`` set, the Django project is set up first, since a machine's
-    module usually imports the project's models before anyone can ask which backend it uses.
+    With ``DJANGO_SETTINGS_MODULE`` naming a project installed here, the Django project is set
+    up first, since a machine's module usually imports the project's models before anyone can
+    ask which backend it uses.
     """
     if not path:
         raise CommandError(f"no machine: pass --machine package.module:name or set {ENV_PREFIX}MACHINE")
@@ -121,7 +126,7 @@ def load_machine(path: str | None) -> Machine:
     if not (module_path and name):
         raise CommandError(f"{path!r}: a machine is named as package.module:name")
     _import_from_working_directory()
-    if DJANGO_SETTINGS_ENV in os.environ:
+    if _django_project():
         from .backends.django.project import setup_project
 
         setup_project()
@@ -129,6 +134,23 @@ def load_machine(path: str | None) -> Machine:
     if not isinstance(machine, Machine):
         raise CommandError(f"{path!r} is not a Machine")
     return machine
+
+
+def _django_project() -> bool:
+    """Whether ``DJANGO_SETTINGS_MODULE`` names a project this process can set up.
+
+    Django and the settings module must both be installed here. A variable set for another
+    program sharing the environment (a container that also runs a Django tool) is not one.
+    """
+    settings_module = os.environ.get(DJANGO_SETTINGS_ENV)
+    return bool(settings_module) and _installed("django") and _installed(settings_module)
+
+
+def _installed(module: str) -> bool:
+    try:
+        return find_spec(module) is not None
+    except ModuleNotFoundError:  # a parent package isn't installed
+        return False
 
 
 def _import_from_working_directory():
@@ -170,6 +192,11 @@ def list_command(machine: Machine, args) -> Result:
     return Result(ids, "\n".join(f"{machine.name}:{entity_id}" for entity_id in ids))
 
 
+def due_command(machine: Machine, args) -> Result:
+    ids = machine.due()
+    return Result(ids, "\n".join(f"{machine.name}:{entity_id}" for entity_id in ids) or "nothing due")
+
+
 def fire_command(machine: Machine, args) -> Result:
     entity_id = _entity_id(machine, args.entity)
     if args.agent:
@@ -186,7 +213,15 @@ def progress_command(machine: Machine, args) -> Result:
 
 
 def progress_all_command(machine: Machine, args) -> Result:
-    return _moves_result(machine.progress_all())
+    """The moves made; with an entity whose step raised, those moves still print, each failure
+    goes to stderr, and the exit code is 2."""
+    try:
+        return _moves_result(machine.progress_all())
+    except ProgressError as error:
+        for entity_id, failure in error.failures.items():
+            print(f"agfsm: {machine.name}:{entity_id}: {type(failure).__name__}: {failure}", file=sys.stderr)
+        moved = _moves_result(error.moves)
+        return Result(moved.data, moved.text, EXIT_ERROR)
 
 
 def _entity_id(machine: Machine, entity: str) -> str:

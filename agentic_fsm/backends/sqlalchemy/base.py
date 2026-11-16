@@ -2,7 +2,8 @@
 
 The tables are the Django backend's, so either backend can keep a machine in the same database.
 Built with no engine, the backend connects to the ``SQLALCHEMY_URL`` setting; one engine is
-made per URL and shared by every backend built from it. ``create_tables()`` makes the tables
+made per URL and shared by every backend built from it. Given a function instead, it calls it
+for the engine on first use. ``create_tables()`` makes the tables
 where they don't exist yet.
 
 ``lock`` opens a transaction and takes the entity's current-state row with ``SELECT ... FOR
@@ -12,9 +13,10 @@ second entity) shares the outer transaction through a savepoint. SQLite has no r
 ignores ``FOR UPDATE``; there the transaction holds the database once it writes.
 """
 
+from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
-from functools import cache
+from functools import cache, cached_property
 
 from sqlalchemy import Connection, Engine, create_engine, insert, select, update
 from sqlalchemy.exc import IntegrityError
@@ -30,8 +32,20 @@ _open: ContextVar[dict[Engine, Connection]] = ContextVar("agentic_fsm_sqlalchemy
 
 
 class StateBackend(BaseStateBackend):
-    def __init__(self, engine: Engine | None = None):
-        self.engine = engine or _engine_for(settings.SQLALCHEMY_URL)
+    def __init__(self, engine: Engine | Callable[[], Engine] | None = None):
+        """``engine`` is an engine, a function that makes one (for a machine declared at import
+        whose database is known only when it runs), or ``None`` for the ``SQLALCHEMY_URL``
+        setting's. Either of the last two is resolved on first use."""
+        self._engine = engine
+
+    @cached_property
+    def engine(self) -> Engine:
+        """The engine the state is kept through, resolved on first use."""
+        if isinstance(self._engine, Engine):
+            return self._engine
+        if self._engine is not None:
+            return self._engine()
+        return _engine_for(settings.SQLALCHEMY_URL)
 
     def create_tables(self):
         """Create the log and current-state tables where they don't exist yet."""
