@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentic-fsm"
+version = "0.1.0"
+description = "Entity lifecycles declared once and advanced the same way by code, a model or an agent."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "GPL-3.0-or-later"
+license-files = ["LICENCE.md"]
+authors = [{ name = "OpenOutreach", email = "hello@openoutreach.app" }]
+keywords = [
+    "state-machine",
+    "fsm",
+    "workflow",
+    "agents",
+    "llm",
+    "django",
+    "open-source",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Framework :: Django",
+]
+
+dependencies = []
+
+[project.optional-dependencies]
+django = [
+    "Django>=6.1",
+]
+dev = [
+    "Django>=6.1",
+    "pytest>=9.2",
+    "pytest-django>=4.14",
+]
+
+[project.urls]
+Source = "https://github.com/eracle/AgenticFSM"
+Issues = "https://github.com/eracle/AgenticFSM/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agentic_fsm"]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "tests.settings"
+pythonpath = ["."]
+testpaths = ["tests"]

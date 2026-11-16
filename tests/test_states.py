@@ -1,0 +1,51 @@
+import pytest
+
+from agentic_fsm import FinalState, InitialState, State, States
+
+from .conftest import Order
+
+
+def test_states_are_a_str_enum_in_declaration_order():
+    assert [s.name for s in Order] == ["pending", "paid", "shipped", "delivered", "cancelled"]
+    assert Order.paid == "paid"
+    assert Order("paid") is Order.paid
+    assert str(Order.paid) == "paid"
+
+
+def test_each_state_keeps_its_description_and_kind():
+    assert Order.paid.description == "Payment cleared, waiting to ship"
+    assert Order.pending.is_initial and not Order.pending.is_final
+    assert Order.delivered.is_final
+    assert (Order.pending.kind, Order.paid.kind, Order.cancelled.kind) == ("initial", "state", "final")
+
+
+def test_value_overrides_the_stored_value():
+    class Legacy(States):
+        new = InitialState("Just made", value="NEW")
+        done = FinalState("Finished")
+
+    assert Legacy.new.value == "NEW"
+    assert Legacy("NEW") is Legacy.new
+    assert Legacy.new.name == "new"
+
+
+@pytest.mark.parametrize("description", ["", "   ", None])
+def test_a_state_needs_a_description(description):
+    with pytest.raises(TypeError, match="needs a description"):
+        State(description)
+
+
+def test_every_attribute_must_be_a_state():
+    with pytest.raises(TypeError, match=r"Bad\.loose is 'x'"):
+
+        class Bad(States):
+            start = InitialState("Start")
+            loose = "x"
+
+
+def test_two_states_cannot_share_a_value():
+    with pytest.raises(TypeError, match=r"Twins\.b and Twins\.a share the value 'a'"):
+
+        class Twins(States):
+            a = InitialState("First")
+            b = FinalState("Second", value="a")
