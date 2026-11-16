@@ -164,6 +164,33 @@ rows don't allow is refused and logged, and the move's `decided_by` is `agent`.
 - **A step with an outside effect should be safe to run twice.** If it sends an email and the
   process dies before the move is written, the next `advance` runs it again.
 
+## At the command line
+
+`agfsm` makes the same moves from a shell, so a coding agent or a script can do every move your
+code can and no other. Each command calls one of the methods above.
+
+| Command | Calls |
+|---|---|
+| `agfsm show [--mermaid]` | `orders.graph()`: the states with their descriptions, then the rows |
+| `agfsm start order:42` | `orders.start(42)` |
+| `agfsm list paid` | `orders.in_state(Order.paid)` |
+| `agfsm fire order:42 payment_cleared` | `orders.fire(42, "payment_cleared")` |
+| `agfsm fire order:42 read_message --agent` | `orders.brief(42, "read_message")` |
+| `agfsm fire order:42 read_message --answer '{...}'` | `orders.fire(42, "read_message", answer=...)` |
+| `agfsm advance` | `orders.advance()` |
+
+- **The machine** is named as `--machine package.module:name` (a module in the working directory
+  works), or by the `MACHINE` setting: `export AGENTIC_FSM_MACHINE=shop.lifecycle:orders`.
+- **An entity** is `<machine name>:<id>`, and the name must be the loaded machine's.
+- **`--json`** prints the result as data: the `Move`, `Brief` or `Graph`, with times as ISO text.
+- **The exit code** is 0 for a move applied or "not now", 1 for a move refused, 2 for one that
+  can't be tried (an unknown step, an entity not started, no machine).
+- **With `DJANGO_SETTINGS_MODULE` set**, `agfsm` sets the Django project up before it loads the
+  machine, as `manage.py` would.
+
+`--agent` then `--answer` lets a session decide an `Ask` with no model key: the first prints the
+instructions, the prompt, the choices and the answer's schema; the second applies the answer.
+
 ## State backends
 
 Where state is kept is a backend. The core imports no database; each backend is its own package,
@@ -200,6 +227,7 @@ Every default is in `agentic_fsm/conf/global_settings.py`, the way Django keeps 
 |---|---|---|
 | `BACKEND` | `None` | the state backend of a machine built without `backend=` |
 | `ASK_MODEL` | `"anthropic:claude-haiku-5-5"` | the model of an `Ask` built without `agent=` |
+| `MACHINE` | `None` | the machine `agfsm` loads without `--machine`, as `package.module:name` |
 
 A setting takes the first value found in `settings.configure(BACKEND=...)`, the environment
 variable `AGENTIC_FSM_<NAME>`, the module named by `AGENTIC_FSM_SETTINGS_MODULE`, then the

@@ -35,6 +35,9 @@ dependencies = [
     "pydantic-ai-slim[anthropic]>=2.68",
 ]
 
+[project.scripts]
+agfsm = "agentic_fsm.cli:main"
+
 [project.optional-dependencies]
 django = [
     "Django>=6.1",

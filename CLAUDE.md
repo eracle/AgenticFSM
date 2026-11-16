@@ -79,9 +79,32 @@ its output type, with the model check deferred so no key is needed until it runs
 Tests use Pydantic AI's `TestModel`; `models.ALLOW_MODEL_REQUESTS = False` keeps any test from
 reaching a real model.
 
+## CLI
+
+`cli.py` is the console script `agfsm` (`main(argv)` returns the exit code), on `argparse` and
+nothing else. It adds no behaviour: each command loads the machine (`--machine
+package.module:name`, or the `MACHINE` setting) and calls one `Machine` method, `show` →
+`graph()`, `start`, `list` → `in_state`, `fire` → `fire` / `brief` (`--agent`) /
+`fire(answer=)` (`--answer`), `advance`. Each command returns a `Result` (the data for `--json`,
+the text, the exit code: 0 applied or "not now", 1 refused, 2 can't be tried).
+
+- An entity is `<machine name>:<id>`, checked against the loaded machine; a state given to
+  `list` is its stored value.
+- `--machine` and `--json` go before or after the command: the subcommands' copies default to
+  `argparse.SUPPRESS` so they don't erase one given before.
+- The working directory goes on `sys.path`, as `python -m` would put it.
+- With `DJANGO_SETTINGS_MODULE` set, `backends/django/project.py:setup_project` runs before the
+  machine's module is imported, since that module usually imports the project's models.
+- Pydantic AI's first-run banner goes to stderr, and never for a run an installed package
+  starts, so `--json` output stays clean.
+
+`tests/test_cli.py` drives `main(argv)` on both backends with machines it puts in
+`tests/machines.py`, the module `--machine tests.machines:orders` names.
+
 ## Settings
 
-`conf/global_settings.py` lists every setting with its default (`BACKEND`, `ASK_MODEL`), and
+`conf/global_settings.py` lists every setting with its default (`BACKEND`, `ASK_MODEL`,
+`MACHINE`), and
 `conf/__init__.py` holds `settings`, as Django's `django.conf` does. A read takes the first of:
 `settings.configure(...)`, the env var `AGENTIC_FSM_<NAME>`, the module named by
 `AGENTIC_FSM_SETTINGS_MODULE`, the default. Nothing is cached, so import order doesn't matter. A

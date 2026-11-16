@@ -1,0 +1,261 @@
+"""``agfsm``: a machine's moves at the command line.
+
+    agfsm --machine shop.lifecycle:orders show
+    agfsm fire order:42 read_message --agent
+    agfsm fire order:42 read_message --answer '{"to": "cancelled", "reason": "..."}'
+
+Each command loads one machine and calls one of its methods, so an agent at the CLI can make
+every move the code can and no other. ``--json`` prints the result as data. The exit code is 0
+for a move applied or "not now", 1 for a move refused, 2 for one that can't be tried.
+"""
+
+import argparse
+import json
+import os
+import sys
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from importlib import import_module
+
+from .backends.base.base import AlreadyStarted, Move
+from .conf import ENV_PREFIX, settings
+from .machine import Graph, Machine, MachineError, TransitionError
+
+EXIT_OK = 0
+EXIT_REFUSED = 1
+EXIT_ERROR = 2
+
+DJANGO_SETTINGS_ENV = "DJANGO_SETTINGS_MODULE"
+
+
+class CommandError(Exception):
+    """A command that can't be run as given: no machine, a bad entity or state."""
+
+
+@dataclass(frozen=True)
+class Result:
+    """What a command prints: ``data`` with ``--json``, ``text`` without, and its exit code."""
+
+    data: object
+    text: str
+    code: int = EXIT_OK
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run ``agfsm`` with ``argv`` (default: the process's arguments) and return its exit code."""
+    args = _parser().parse_args(argv)
+    try:
+        machine = load_machine(args.machine or settings.MACHINE)
+        result = args.command(machine, args)
+    except (CommandError, MachineError, TransitionError, AlreadyStarted, LookupError) as error:
+        print(f"agfsm: {error}", file=sys.stderr)
+        return EXIT_ERROR
+    print(json.dumps(result.data, default=_json_default, indent=2) if args.json else result.text)
+    return result.code
+
+
+# ── Arguments ──
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="agfsm", description="A machine's moves at the command line.")
+    _add_common(parser, default=None)
+    shared = argparse.ArgumentParser(add_help=False)
+    _add_common(shared, default=argparse.SUPPRESS)  # given after the command, without erasing one given before
+    commands = parser.add_subparsers(required=True, metavar="command")
+
+    show = commands.add_parser("show", parents=[shared], help="the states and the transition rows")
+    show.add_argument("--mermaid", action="store_true", help="as a Mermaid state diagram")
+    show.set_defaults(command=show_command)
+
+    start = commands.add_parser("start", parents=[shared], help="put an entity in the initial state")
+    start.add_argument("entity", help="<machine>:<id>")
+    start.set_defaults(command=start_command)
+
+    listing = commands.add_parser("list", parents=[shared], help="the entities in a state")
+    listing.add_argument("state", help="a state's stored value")
+    listing.set_defaults(command=list_command)
+
+    fire = commands.add_parser("fire", parents=[shared], help="run one step on one entity")
+    fire.add_argument("entity", help="<machine>:<id>")
+    fire.add_argument("step", help="the step's name")
+    in_place = fire.add_mutually_exclusive_group()
+    in_place.add_argument("--agent", action="store_true", help="print what the model would be given")
+    in_place.add_argument("--answer", help="decide in the model's place: a JSON object or a state")
+    fire.set_defaults(command=fire_command)
+
+    advance = commands.add_parser("advance", parents=[shared], help="try the steps out of every entity's state")
+    advance.set_defaults(command=advance_command)
+    return parser
+
+
+def _add_common(parser: argparse.ArgumentParser, *, default):
+    parser.add_argument(
+        "--machine",
+        default=default,
+        help=f"package.module:name (default: the MACHINE setting, {ENV_PREFIX}MACHINE)",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        default=default if default is argparse.SUPPRESS else False,
+        help="print the result as JSON",
+    )
+
+
+# ── Loading the machine ──
+
+
+def load_machine(path: str | None) -> Machine:
+    """The ``Machine`` at ``package.module:name``.
+
+    With ``DJANGO_SETTINGS_MODULE`` set, the Django project is set up first, since a machine's
+    module usually imports the project's models before anyone can ask which backend it uses.
+    """
+    if not path:
+        raise CommandError(f"no machine: pass --machine package.module:name or set {ENV_PREFIX}MACHINE")
+    module_path, _, name = path.partition(":")
+    if not (module_path and name):
+        raise CommandError(f"{path!r}: a machine is named as package.module:name")
+    _import_from_working_directory()
+    if DJANGO_SETTINGS_ENV in os.environ:
+        from .backends.django.project import setup_project
+
+        setup_project()
+    machine = getattr(_import(module_path), name, None)
+    if not isinstance(machine, Machine):
+        raise CommandError(f"{path!r} is not a Machine")
+    return machine
+
+
+def _import_from_working_directory():
+    """Let ``--machine`` name a module in the working directory, as ``python -m`` would."""
+    if os.getcwd() not in sys.path:
+        sys.path.insert(0, os.getcwd())
+
+
+def _import(module_path: str):
+    try:
+        return import_module(module_path)
+    except ModuleNotFoundError as error:
+        if error.name and not module_path.startswith(error.name):
+            raise  # the module exists; something it imports isn't installed
+        raise CommandError(f"no module {module_path}") from None
+
+
+# ── Commands ──
+
+
+def show_command(machine: Machine, args) -> Result:
+    if args.mermaid and args.json:
+        raise CommandError("--mermaid and --json: choose one")
+    graph = machine.graph()
+    return Result(asdict(graph), mermaid(graph) if args.mermaid else _graph_text(graph))
+
+
+def start_command(machine: Machine, args) -> Result:
+    return _move_result(machine.start(_entity_id(machine, args.entity)))
+
+
+def list_command(machine: Machine, args) -> Result:
+    try:
+        state = machine.states(args.state)
+    except ValueError:
+        values = ", ".join(s.value for s in machine.states)
+        raise CommandError(f"{args.state!r} is not a state of {machine.name}; they are {values}") from None
+    ids = machine.in_state(state)
+    return Result(ids, "\n".join(f"{machine.name}:{entity_id}" for entity_id in ids))
+
+
+def fire_command(machine: Machine, args) -> Result:
+    entity_id = _entity_id(machine, args.entity)
+    if args.agent:
+        brief = machine.brief(entity_id, args.step)
+        return Result(asdict(brief), _brief_text(brief, args.entity))
+    move = machine.fire(entity_id, args.step, answer=args.answer)
+    if move is None:
+        return Result(None, "not now")
+    return _move_result(move)
+
+
+def advance_command(machine: Machine, args) -> Result:
+    moves = machine.advance()
+    code = EXIT_OK if all(move.applied for move in moves) else EXIT_REFUSED
+    return Result([asdict(move) for move in moves], "\n\n".join(map(_move_text, moves)), code)
+
+
+def _entity_id(machine: Machine, entity: str) -> str:
+    """The id in ``<machine>:<id>``, checked against the loaded machine's name."""
+    prefix, separator, entity_id = entity.partition(":")
+    if not (separator and entity_id):
+        raise CommandError(f"{entity!r}: name the entity as {machine.name}:<id>")
+    if prefix != machine.name:
+        raise CommandError(f"{entity!r} is not a {machine.name}; the machine loaded is {machine.name}")
+    return entity_id
+
+
+def _move_result(move: Move) -> Result:
+    return Result(asdict(move), _move_text(move), EXIT_OK if move.applied else EXIT_REFUSED)
+
+
+# ── Text ──
+
+
+def _graph_text(graph: Graph) -> str:
+    states = _columns([(s.value, s.kind, s.description) for s in graph.states])
+    rows = _columns([("from", "to", "step"), *graph.transitions])
+    return f"{graph.name}\n\n{states}\n\n{rows}"
+
+
+def mermaid(graph: Graph) -> str:
+    """The machine as a Mermaid state diagram, each state labelled with its description."""
+    lines = ["stateDiagram-v2"]
+    lines += [f"    {s.value} : {s.description}" for s in graph.states]
+    lines += [f"    [*] --> {s.value}" for s in graph.states if s.kind == "initial"]
+    lines += [f"    {source} --> {target} : {step}" for source, target, step in graph.transitions]
+    lines += [f"    {s.value} --> [*]" for s in graph.states if s.kind == "final"]
+    return "\n".join(lines)
+
+
+def _move_text(move: Move) -> str:
+    entity = f"{move.machine}:{move.entity}"
+    if move.step is None:
+        return f"{entity} started in {move.to_state}"
+    line = f"{entity} {move.from_state} -> {move.to_state} by {move.step}, decided by {move.decided_by}"
+    if not move.applied:
+        line = f"refused: {line}\n  {move.reason}"
+    details = {k: v for k, v in (move.decision or {}).items() if k != "to"}
+    return "\n".join([line, *(f"  {k}: {v}" for k, v in details.items())])
+
+
+def _brief_text(brief, entity: str) -> str:
+    """The brief laid out for a session to read, ending with how to answer it."""
+    if brief.prompt is None:
+        return f"not now: {brief.step} has nothing to ask about {entity}"
+    sections = [
+        ("Instructions", "\n\n".join(brief.instructions) or "(none)"),
+        ("Prompt", brief.prompt),
+        ("Choices", _columns(brief.choices)),
+        ("Answer schema", json.dumps(brief.schema, indent=2)),
+    ]
+    if brief.tools:
+        sections.append(("The model's tools (gather the same facts with your own)", _columns(brief.tools)))
+    sections.append(("Answer with", f"agfsm fire {entity} {brief.step} --answer '<JSON object>'"))
+    body = "\n\n".join(f"{title}:\n{_indent(text)}" for title, text in sections)
+    return f"{brief.step} on {entity}\n\n{body}"
+
+
+def _columns(rows) -> str:
+    rows = [tuple(map(str, row)) for row in rows]
+    widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]) - 1)] if rows else []
+    return "\n".join("  ".join([*(c.ljust(w) for c, w in zip(row, widths)), row[-1]]) for row in rows)
+
+
+def _indent(text: str) -> str:
+    return "\n".join(f"  {line}" if line else line for line in text.splitlines())
+
+
+def _json_default(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    raise TypeError(f"{type(value).__name__} is not JSON serializable")
