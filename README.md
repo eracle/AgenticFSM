@@ -11,6 +11,7 @@ in an append-only log, and raises on a move the list doesn't have.
 ```bash
 pip install agentic-fsm            # the library; brings Pydantic AI for steps a model decides
 pip install "agentic-fsm[django]"  # with the Django state backend
+pip install "agentic-fsm[sqlalchemy]"  # with the SQLAlchemy state backend; add your database's driver
 ```
 
 ## A machine
@@ -168,7 +169,7 @@ reason; nothing is written, and the session answers again.
   that brings the entity back to a state it already left, so it never loops.
 - **Two callers can't both move an entity.** `fire` locks the entity from the read of its state
   to the write of the move; a second caller waits, then reads the state the first left. With
-  the Django backend the step's own writes commit with the move.
+  the Django and SQLAlchemy backends the step's own writes commit with the move.
 - **A step with an outside effect should be safe to run twice.** If it sends an email and the
   process dies before the move commits, the next call runs it again.
 
@@ -215,6 +216,7 @@ or `Machine(..., backend="agentic_fsm.backends.django")`. A machine with neither
 | Backend | Keeps state in | Needs |
 |---|---|---|
 | `agentic_fsm.backends.django` | a Django project's database | `agentic-fsm[django]` |
+| `agentic_fsm.backends.sqlalchemy` | any database SQLAlchemy reaches | `agentic-fsm[sqlalchemy]` and a driver |
 | `agentic_fsm.backends.locmem` | this process's memory, for tests | nothing |
 
 For the Django backend, add its app and migrate:
@@ -225,6 +227,26 @@ INSTALLED_APPS = [..., "agentic_fsm.backends.django"]
 
 It writes through Django's own connection, so wrapping `fire` in `transaction.atomic()` commits
 your rows and the move together.
+
+The SQLAlchemy backend connects to the `SQLALCHEMY_URL` setting, or takes an engine:
+
+```python
+from agentic_fsm.backends.sqlalchemy.base import StateBackend
+
+backend = StateBackend(engine)  # or built from AGENTIC_FSM_SQLALCHEMY_URL
+backend.create_tables()         # where they don't exist yet
+orders = Machine(Order, TRANSITIONS, load=load_order, backend=backend)
+
+
+def ship(order):
+    backend.connection().execute(insert(shipments).values(order_id=order.id))
+    return Order.shipped
+```
+
+`backend.connection()`, called while a step runs, is the connection of the move's transaction:
+what the step writes through it commits with the move and is undone if the step raises. Its two
+tables are the Django backend's, so the two backends can keep machines in one database and read
+each other's.
 
 A backend of your own is a package whose `base` module has a `StateBackend` subclassing
 `agentic_fsm.BaseStateBackend`.
@@ -238,6 +260,7 @@ Every default is in `agentic_fsm/conf/global_settings.py`, the way Django keeps 
 | `BACKEND` | `None` | the state backend of a machine built without `backend=` |
 | `DECIDE_MODEL` | `"anthropic:claude-haiku-5-5"` | the model of a `Decide` built without `agent=` |
 | `MACHINE` | `None` | the machine `agfsm` loads without `--machine`, as `package.module:name` |
+| `SQLALCHEMY_URL` | `None` | the database of a SQLAlchemy backend built without an engine |
 
 A setting takes the first value found in `settings.configure(BACKEND=...)`, the environment
 variable `AGENTIC_FSM_<NAME>`, the module named by `AGENTIC_FSM_SETTINGS_MODULE`, then the
@@ -255,6 +278,10 @@ settings.configure(BACKEND="agentic_fsm.backends.django")
 uv venv && uv pip install -e ".[dev]"
 pytest
 ```
+
+Set `AGENTIC_FSM_TEST_POSTGRES_URL` (e.g. `postgresql+psycopg://postgres:pg@localhost:5432/postgres`)
+to also test the SQLAlchemy backend's row lock on Postgres; the test drops and recreates the two
+tables there.
 
 ## Licence
 

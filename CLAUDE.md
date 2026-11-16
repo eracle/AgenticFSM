@@ -111,7 +111,7 @@ with the reason on stderr).
 ## Settings
 
 `conf/global_settings.py` lists every setting with its default (`BACKEND`, `DECIDE_MODEL`,
-`MACHINE`), and
+`MACHINE`, `SQLALCHEMY_URL`), and
 `conf/__init__.py` holds `settings`, as Django's `django.conf` does. A read takes the first of:
 `settings.configure(...)`, the env var `AGENTIC_FSM_<NAME>`, the module named by
 `AGENTIC_FSM_SETTINGS_MODULE`, the default. Nothing is cached, so import order doesn't matter. A
@@ -132,6 +132,14 @@ machine with neither raises). `backends/__init__.py:get_backend` imports `<path>
   entity), and their migrations. `lock` is `transaction.atomic()` around a `select_for_update`
   of the entity's current-state row; SQLite ignores the row lock. It's the only place Django is
   imported.
+- `backends/sqlalchemy/`: the same two tables as SQLAlchemy `Table`s (`tables.py`; names,
+  columns, indexes and constraint match the Django models, and `test_backend_sqlalchemy.py`
+  checks it), so the two backends share one database. `StateBackend(engine=None)` falls back to
+  one cached engine per `SQLALCHEMY_URL`; `create_tables()` makes what's missing. `lock` is
+  `engine.begin()` around a `SELECT ... FOR UPDATE`, and the open connection sits in a
+  `ContextVar` keyed by engine: `connection()` hands it to a step so its writes commit with the
+  move, a lock inside it takes a savepoint, and reads inside it go through it. `UTCDateTime`
+  gives back aware UTC datetimes on SQLite too. It's the only place SQLAlchemy is imported.
 
 Every backend keeps the same two things and the same rule: `move`, called inside `lock`,
 rewrites the entity's current-state row and appends its log row, and both commit when the lock
@@ -148,7 +156,8 @@ pytest
 ```
 
 `tests/conftest.py` holds the example `Order` machine. Its `backend` fixture is parametrized, so
-every test that takes `orders` or `backend` runs once on `locmem` and once on `django`
-(pytest-django, in-memory SQLite, `tests/settings.py`). A new backend is added to that fixture
+every test that takes `orders` or `backend` runs on `locmem`, on `django` (pytest-django,
+in-memory SQLite, `tests/settings.py`) and on `sqlalchemy` (in-memory SQLite, `StaticPool`).
+With `AGENTIC_FSM_TEST_POSTGRES_URL` set, the SQLAlchemy row lock is also tested on Postgres. A new backend is added to that fixture
 and must pass the same tests. After changing a model, write the migration and check
 `DJANGO_SETTINGS_MODULE=tests.settings python -m django makemigrations --check --dry-run`.

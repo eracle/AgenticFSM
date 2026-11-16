@@ -6,7 +6,8 @@ the package's dotted path:
     AGENTIC_FSM_BACKEND=agentic_fsm.backends.django
 
 ``locmem`` keeps state in memory, for tests. ``django`` keeps it in a Django project's database
-and is the only place Django is imported. A backend from outside this package works the same
+and is the only place Django is imported; ``sqlalchemy`` keeps it in the same two tables in any
+database SQLAlchemy reaches, and is the only place SQLAlchemy is imported. A backend from outside this package works the same
 way.
 """
 

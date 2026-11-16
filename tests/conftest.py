@@ -48,9 +48,28 @@ def new_order(**facts):
     return SimpleNamespace(**{**defaults, **facts})
 
 
-@pytest.fixture(params=["locmem", pytest.param("django", marks=pytest.mark.django_db)])
+@pytest.fixture(params=["locmem", pytest.param("django", marks=pytest.mark.django_db), "sqlalchemy"])
 def backend(request):
+    if request.param == "sqlalchemy":
+        return sqlalchemy_backend()
     return get_backend(f"agentic_fsm.backends.{request.param}")
+
+
+def sqlalchemy_backend():
+    """A sqlalchemy backend on a fresh in-memory SQLite database, its tables created.
+
+    One connection is shared by the whole test (``StaticPool``), and ``autocommit=False`` lets
+    Python's sqlite3 run the savepoints a nested lock opens.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import StaticPool
+
+    from agentic_fsm.backends.sqlalchemy.base import StateBackend
+
+    engine = create_engine("sqlite://", poolclass=StaticPool, connect_args={"autocommit": False})
+    backend = StateBackend(engine)
+    backend.create_tables()
+    return backend
 
 
 @pytest.fixture
