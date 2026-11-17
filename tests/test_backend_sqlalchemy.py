@@ -3,18 +3,24 @@ tables Django's models also describe, the ``SQLALCHEMY_URL`` setting, and the ro
 Postgres when ``AGENTIC_FSM_TEST_POSTGRES_URL`` names one to test against."""
 
 import os
+from datetime import UTC, datetime
 from threading import Event, Thread
 
 import pytest
 from sqlalchemy import Column, Integer, MetaData, String, Table, create_engine, insert, select
 
 from agentic_fsm import Machine, get_backend
+from agentic_fsm.backends.base.base import Move
 from agentic_fsm.backends.django.models import CurrentState, LogEntry
 from agentic_fsm.backends.sqlalchemy.base import StateBackend
 from agentic_fsm.backends.sqlalchemy.tables import current_state, log_entry, metadata
 from agentic_fsm.conf import settings
 
 from .conftest import TRANSITIONS, Order, cancel, new_order, sqlalchemy_backend
+
+# The one instant both backends log their moves at, so the rows they store can be compared.
+MOVED_AT = datetime(2026, 1, 2, 3, 4, 5, 678901, tzinfo=UTC)
+ON_THE_SECOND = MOVED_AT.replace(microsecond=0)
 
 # The inheritor's own table, which a step writes to.
 receipts_metadata = MetaData()
@@ -114,6 +120,53 @@ def test_the_tables_are_the_django_backends(table, model):
     assert names >= {index.name for index in model._meta.indexes} | {
         constraint.name for constraint in model._meta.constraints
     }
+
+
+STORED_LOG = (
+    "SELECT machine, entity, step, from_state, to_state, decided_by, decision, CAST(at AS TEXT) "
+    "FROM agentic_fsm_logentry ORDER BY id"
+)
+STORED_STATE = (
+    "SELECT machine, entity, state, CAST(updated_at AS TEXT) FROM agentic_fsm_currentstate ORDER BY id"
+)
+
+
+def write_an_orders_moves(backend, at=MOVED_AT):
+    """A start, a move with a decision and a move with none, through the backend's own calls."""
+    backend.start("order", "1", "pending")
+    for to_state, decision in (("paid", {"to": "paid", "note": "cleared"}), ("shipped", None)):
+        with backend.lock("order", "1") as current:
+            backend.move(Move("order", "1", "step", current.state, to_state, "code", at, decision))
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("at", [MOVED_AT, ON_THE_SECOND])
+def test_both_backends_store_the_same_rows(monkeypatch, at):
+    """Row for row and value for value as SQLite keeps them, so a database written through
+    one backend reads the same through the other."""
+    from django.db import connection
+
+    for module in ("django", "sqlalchemy"):
+        monkeypatch.setattr(f"agentic_fsm.backends.{module}.base.utc_now", lambda: at)
+    through_sqlalchemy = sqlalchemy_backend()
+    write_an_orders_moves(through_sqlalchemy, at)
+    write_an_orders_moves(get_backend("agentic_fsm.backends.django"), at)
+
+    for query in (STORED_LOG, STORED_STATE):
+        with connection.cursor() as cursor:
+            by_django = [tuple(row) for row in cursor.execute(query).fetchall()]
+        with through_sqlalchemy.engine.connect() as raw:
+            by_sqlalchemy = [tuple(row) for row in raw.exec_driver_sql(query)]
+        assert by_sqlalchemy == by_django
+
+
+def test_a_move_with_no_decision_stores_null():
+    backend = sqlalchemy_backend()
+    write_an_orders_moves(backend)
+
+    with backend.engine.connect() as raw:
+        stored = raw.exec_driver_sql("SELECT decision IS NULL FROM agentic_fsm_logentry ORDER BY id")
+        assert [bool(is_null) for (is_null,) in stored] == [True, False, True]
 
 
 def test_create_tables_leaves_existing_tables_and_rows(table):

@@ -145,8 +145,9 @@ machine with neither raises). `backends/__init__.py:get_backend` imports `<path>
   of the entity's current-state row; SQLite ignores the row lock. It's the only place Django is
   imported.
 - `backends/sqlalchemy/`: the same two tables as SQLAlchemy `Table`s (`tables.py`; names,
-  columns, indexes and constraint match the Django models, and `test_backend_sqlalchemy.py`
-  checks it), so the two backends share one database. `StateBackend(engine=None)` takes an
+  columns, indexes and constraint match the Django models, and the two store the same values:
+  SQL NULL for a move with no decision, and on SQLite the same datetime text;
+  `test_backend_sqlalchemy.py` checks both), so the two backends share one database. `StateBackend(engine=None)` takes an
   engine, a function returning one, or nothing for one cached engine per `SQLALCHEMY_URL`; the
   last two resolve on first use (`engine` is a `cached_property`), so a module-level machine
   imports with no database configured. `create_tables()` makes what's missing. `lock` is
