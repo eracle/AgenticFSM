@@ -6,9 +6,10 @@
         delivered = FinalState("The carrier delivered it")
 
 ``Order`` is a ``str`` enum: ``Order.pending == "pending"``, ``Order("pending") is Order.pending``, and it
-works as a Pydantic field type. Each member keeps its description and its kind.
+works as a Pydantic field type. Each member keeps its description, its kind and its tags.
 """
 
+from collections.abc import Iterable
 from enum import Enum, EnumMeta
 
 INITIAL = "initial"
@@ -20,17 +21,33 @@ FINAL = "final"
 
 
 class State:
-    """A state with its definition. ``value=`` overrides the stored value (default: the name)."""
+    """A state with its definition. ``value=`` overrides the stored value (default: the name).
+
+    ``tags=`` names the queues the state is: whoever works one tag moves only the entities
+    waiting in a state that carries it (``Machine.progress_all(tag=)``, ``Machine.due(tag=)``).
+    """
 
     kind = PLAIN
 
-    def __init__(self, description: str, *, value: str | None = None):
+    def __init__(self, description: str, *, value: str | None = None, tags: Iterable[str] = ()):
         if not isinstance(description, str) or not description.strip():
             raise TypeError(f"{type(self).__name__} needs a description, the state's definition")
         if value is not None and (not isinstance(value, str) or not value):
             raise TypeError(f"value= must be a non-empty string, got {value!r}")
         self.description = description
         self.value = value
+        self.tags = _tags(tags)
+
+
+def _tags(tags) -> frozenset[str]:
+    """``tags=`` as a set of non-empty strings; a bare string is refused, not read as letters."""
+    if isinstance(tags, str) or not isinstance(tags, Iterable):
+        raise TypeError(f"tags= must be a collection of strings, got {tags!r}")
+    tags = frozenset(tags)
+    for tag in tags:
+        if not isinstance(tag, str) or not tag:
+            raise TypeError(f"a tag must be a non-empty string, got {tag!r}")
+    return tags
 
 
 class InitialState(State):
@@ -98,6 +115,10 @@ class States(str, Enum, metaclass=_StatesMeta):
     @property
     def kind(self) -> str:
         return type(self)._declarations[self.name].kind
+
+    @property
+    def tags(self) -> frozenset[str]:
+        return type(self)._declarations[self.name].tags
 
     @property
     def is_initial(self) -> bool:

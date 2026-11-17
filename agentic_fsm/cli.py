@@ -77,6 +77,7 @@ def _parser() -> argparse.ArgumentParser:
     listing.set_defaults(command=list_command)
 
     due = commands.add_parser("due", parents=[shared], help="the entities a step could move now")
+    due.add_argument("--tag", help="only the entities in a state carrying this tag")
     due.set_defaults(command=due_command)
 
     fire = commands.add_parser("fire", parents=[shared], help="run one step on one entity")
@@ -92,6 +93,7 @@ def _parser() -> argparse.ArgumentParser:
     progress.set_defaults(command=progress_command)
 
     progress_all = commands.add_parser("progress_all", parents=[shared], help="at most one move for every entity")
+    progress_all.add_argument("--tag", help="only the entities in a state carrying this tag")
     progress_all.set_defaults(command=progress_all_command)
     return parser
 
@@ -193,7 +195,7 @@ def list_command(machine: Machine, args) -> Result:
 
 
 def due_command(machine: Machine, args) -> Result:
-    ids = machine.due()
+    ids = machine.due(args.tag)
     return Result(ids, "\n".join(f"{machine.name}:{entity_id}" for entity_id in ids) or "nothing due")
 
 
@@ -216,7 +218,7 @@ def progress_all_command(machine: Machine, args) -> Result:
     """The moves made; with an entity whose step raised, those moves still print, each failure
     goes to stderr, and the exit code is 2."""
     try:
-        return _moves_result(machine.progress_all())
+        return _moves_result(machine.progress_all(args.tag))
     except ProgressError as error:
         for entity_id, failure in error.failures.items():
             print(f"agfsm: {machine.name}:{entity_id}: {type(failure).__name__}: {failure}", file=sys.stderr)
@@ -246,9 +248,14 @@ def _moves_result(moves: list[Move]) -> Result:
 
 
 def _graph_text(graph: Graph) -> str:
-    states = _columns([(s.value, s.kind, s.description) for s in graph.states])
+    states = _columns([(s.value, s.kind, _described(s)) for s in graph.states])
     rows = _columns([("from", "to", "step"), *graph.transitions])
     return f"{graph.name}\n\n{states}\n\n{rows}"
+
+
+def _described(state) -> str:
+    """A state's description, followed by its tags when it has any."""
+    return f"{state.description} [{', '.join(state.tags)}]" if state.tags else state.description
 
 
 def mermaid(graph: Graph) -> str:

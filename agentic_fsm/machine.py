@@ -78,6 +78,7 @@ class StateInfo:
     value: str
     kind: str
     description: str
+    tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -136,7 +137,9 @@ class Machine:
         """The states with their descriptions and every row, in declaration order."""
         return Graph(
             name=self.name,
-            states=[StateInfo(s.name, s.value, s.kind, s.description) for s in self.states],
+            states=[
+                StateInfo(s.name, s.value, s.kind, s.description, tuple(sorted(s.tags))) for s in self.states
+            ],
             transitions=[(e.from_state.value, e.to_state.value, _step_name(e.step)) for e in self.edges],
         )
 
@@ -231,19 +234,24 @@ class Machine:
                 break
         return moves
 
-    def progress_all(self) -> list[Move]:
+    def progress_all(self, tag: str | None = None) -> list[Move]:
         """Try the steps out of each non-final entity's state, in list order.
 
         The first step that doesn't return ``None`` decides, so each entity makes at most one move
         per call. Each entity is locked and committed on its own. Returns the moves made.
 
+        With ``tag``, only the entities in a state carrying it are tried: one worker per tag,
+        each moving its own queue. A tag no state carries raises ``MachineError``.
+
         An entity whose step raises doesn't hold the others: its move is undone, the rest are
         tried, and ``ProgressError`` is raised at the end with the moves made and each failure.
         """
+        tagged = self._tagged(tag)
         moves, failures = [], {}
         for current in self.backend.all_current(self.name):
             try:
-                if not self._exits.get(self._state(current)):
+                state = self._state(current)
+                if not self._exits.get(state) or (tagged is not None and state not in tagged):
                     continue
                 move = self._one_move(current.entity)
             except Exception as error:
@@ -255,20 +263,34 @@ class Machine:
             raise ProgressError(moves, failures)
         return moves
 
-    def due(self) -> list[str]:
+    def due(self, tag: str | None = None) -> list[str]:
         """The unfinished entities a step could move now; nothing is moved or written.
 
         For a scheduler deciding whether a run is worth starting. Each entity is tried as
         ``progress_all`` would try it, under its lock: a ``check`` step runs and says whether it
         would move the entity; any other step (an outside effect, a ``Decide``) can't be tried
         without its effect, so an entity it leaves is due once the checks before it say "not
-        now". Returns the entity ids, oldest first.
+        now". With ``tag``, only the entities in a state carrying it, as ``progress_all(tag)``
+        would try. Returns the entity ids, oldest first.
         """
+        tagged = self._tagged(tag)
         return [
             current.entity
             for current in self.backend.all_current(self.name)
-            if self._exits.get(self._state(current)) and self._would_move(current.entity)
+            if self._exits.get(state := self._state(current))
+            and (tagged is None or state in tagged)
+            and self._would_move(current.entity)
         ]
+
+    def _tagged(self, tag: str | None) -> set[States] | None:
+        """The states carrying ``tag``; ``None`` for no tag, which is every state."""
+        if tag is None:
+            return None
+        tagged = {state for state in self.states if tag in state.tags}
+        if not tagged:
+            known = ", ".join(sorted({t for state in self.states for t in state.tags})) or "none"
+            raise MachineError(f"no state of {self.name} is tagged {tag!r}; its tags are {known}")
+        return tagged
 
     def _would_move(self, entity_id: str) -> bool:
         """Under the entity's lock, whether the first step to answer would move it."""

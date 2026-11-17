@@ -29,6 +29,22 @@ def test_value_overrides_the_stored_value():
     assert Legacy.new.name == "new"
 
 
+def test_a_state_keeps_its_tags_and_has_none_by_default():
+    class Tagged(States):
+        new = InitialState("Just made")
+        packing = State("Being packed", tags=["warehouse", "printer"])
+        done = FinalState("Finished")
+
+    assert Tagged.packing.tags == {"warehouse", "printer"}
+    assert Tagged.new.tags == frozenset()
+
+
+@pytest.mark.parametrize("tags", ["warehouse", [""], [3], 3])
+def test_tags_must_be_a_collection_of_non_empty_strings(tags):
+    with pytest.raises(TypeError, match="tag"):
+        State("Being packed", tags=tags)
+
+
 @pytest.mark.parametrize("description", ["", "   ", None])
 def test_a_state_needs_a_description(description):
     with pytest.raises(TypeError, match="needs a description"):

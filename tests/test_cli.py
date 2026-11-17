@@ -101,6 +101,7 @@ def test_show_json_is_the_graph(capsys, cli_orders):
         "value": "pending",
         "kind": "initial",
         "description": "Placed, not paid yet",
+        "tags": [],
     }
     assert ["pending", "paid", "payment_cleared"] in data["transitions"]
 
@@ -260,6 +261,21 @@ def test_due_lists_what_a_step_could_move_and_moves_nothing(capsys, backend, tab
     assert code == EXIT_OK
     assert out.strip() == "order:1"
     assert machine.in_state(Order.pending) == ["1", "2"]
+
+
+def test_a_tag_narrows_due_and_progress_all_and_show_prints_it(capsys, backend, table, monkeypatch):
+    from .test_machine_moves import parcels_in_every_state
+
+    monkeypatch.setattr(machines, "orders", parcels_in_every_state(backend, table))
+
+    assert run(capsys, *ORDERS, "due", "--tag", "carrier")[1].strip() == "parcel:4"
+    code, data = run_json(capsys, *ORDERS, "progress_all", "--tag", "warehouse")
+    assert code == EXIT_OK
+    assert [(m["entity"], m["to_state"]) for m in data] == [("2", "labelling"), ("3", "shipped")]
+    assert "Packed: the warehouse labels it [printer, warehouse]" in run(capsys, *ORDERS, "show")[1]
+    code, _, err = run(capsys, *ORDERS, "due", "--tag", "nobody")
+    assert code == EXIT_ERROR
+    assert "no state of parcel is tagged 'nobody'" in err
 
 
 def test_a_django_settings_module_not_installed_here_is_left_alone(capsys, cli_orders, monkeypatch):

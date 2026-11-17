@@ -182,6 +182,20 @@ reason; nothing is written, and the session answers again.
   def payment_cleared(order):
       return Order.paid if order.payment_cleared else None
   ```
+- **A tag makes a state a queue.** Give a state `tags=`, and `progress_all(tag)` and `due(tag)`
+  try only the entities waiting in a state that carries it. One worker then does one kind of
+  work, on its own schedule: the warehouse's run never calls the model, and a slow model never
+  holds the warehouse. A state can carry several tags; a tag no state carries raises
+  `MachineError`.
+
+  ```python
+  class Order(States):
+      pending   = InitialState("Placed, not paid yet")
+      paid      = State("Payment cleared, waiting to ship", tags={"warehouse"})
+      ...
+
+  orders.progress_all("warehouse")   # only the orders in `paid`
+  ```
 - **`progress` goes on until the entity rests**: a final state, or one whose steps all say "not
   now". It loads the entity afresh after each move, commits each move, and stops after a move
   that brings the entity back to a state it already left, so it never loops.
@@ -201,12 +215,12 @@ code can and no other. Each command calls one of the methods above.
 | `agfsm show [--mermaid]` | `orders.graph()`: the states with their descriptions, then the rows |
 | `agfsm start order:42` | `orders.start(42)` |
 | `agfsm list paid` | `orders.in_state(Order.paid)` |
-| `agfsm due` | `orders.due()` |
+| `agfsm due [--tag warehouse]` | `orders.due()`, or `orders.due("warehouse")` |
 | `agfsm fire order:42 payment_cleared` | `orders.fire(42, "payment_cleared")` |
 | `agfsm fire order:42 read_message --agent` | `orders.brief(42, "read_message")` |
 | `agfsm fire order:42 read_message --answer '{...}'` | `orders.fire(42, "read_message", answer=...)` |
 | `agfsm progress order:42` | `orders.progress(42)` |
-| `agfsm progress_all` | `orders.progress_all()` |
+| `agfsm progress_all [--tag warehouse]` | `orders.progress_all()`, or `orders.progress_all("warehouse")` |
 
 - **The machine** is named as `--machine package.module:name` (a module in the working directory
   works), or by the `MACHINE` setting: `export AGENTIC_FSM_MACHINE=shop.lifecycle:orders`.

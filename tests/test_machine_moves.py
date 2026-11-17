@@ -11,8 +11,13 @@ from agentic_fsm import (
     AlreadyStarted,
     Decide,
     Decision,
+    FinalState,
+    InitialState,
     Machine,
+    MachineError,
     ProgressError,
+    State,
+    States,
     TransitionError,
     check,
     get_backend,
@@ -506,6 +511,88 @@ def test_a_finished_entity_is_never_due_nor_loaded(backend, table):
     del table["1"]  # loading it now would raise
 
     assert orders.due() == []
+
+
+# ── tags ──
+
+
+class Parcel(States):
+    pending = InitialState("Placed, not paid yet")
+    packing = State("Paid: the warehouse packs it", tags={"warehouse"})
+    labelling = State("Packed: the warehouse labels it", tags={"warehouse", "printer"})
+    shipped = State("Handed to the carrier", tags={"carrier"})
+    delivered = FinalState("The carrier delivered it")
+
+
+@check
+def paid(parcel):
+    return Parcel.packing if parcel.payment_cleared else None
+
+
+def pack(parcel):
+    return Parcel.labelling
+
+
+def label(parcel):
+    return Parcel.shipped
+
+
+@check
+def parcel_delivered(parcel):
+    return Parcel.delivered if parcel.delivered else None
+
+
+PARCEL_ROWS = [
+    (Parcel.pending, Parcel.packing, paid),
+    (Parcel.packing, Parcel.labelling, pack),
+    (Parcel.labelling, Parcel.shipped, label),
+    (Parcel.shipped, Parcel.delivered, parcel_delivered),
+]
+
+
+def parcels_in_every_state(backend, table):
+    """Parcels 1 to 4, one in each unfinished state, each with a move it could make."""
+    parcels = Machine(Parcel, PARCEL_ROWS, load=lambda parcel_id: table[parcel_id], backend=backend)
+    for parcel_id in "1234":
+        table[parcel_id] = new_order(payment_cleared=True, delivered=True)
+    parcels.start_all("1234")
+    for parcel_id, steps in (("2", [paid]), ("3", [paid, pack]), ("4", [paid, pack, label])):
+        for step in steps:
+            parcels.fire(parcel_id, step)
+    return parcels
+
+
+def test_progress_all_with_a_tag_moves_only_the_entities_in_its_states(backend, table):
+    parcels = parcels_in_every_state(backend, table)
+
+    moves = parcels.progress_all("warehouse")
+
+    assert [(m.entity, m.to_state) for m in moves] == [("2", "labelling"), ("3", "shipped")]
+    assert parcels.state_of(1) is Parcel.pending
+    assert parcels.state_of(4) is Parcel.shipped
+
+
+def test_a_state_may_carry_several_tags(backend, table):
+    parcels = parcels_in_every_state(backend, table)
+
+    assert [m.entity for m in parcels.progress_all("printer")] == ["3"]
+
+
+def test_due_with_a_tag_lists_only_the_entities_in_its_states(backend, table):
+    parcels = parcels_in_every_state(backend, table)
+
+    assert parcels.due() == ["1", "2", "3", "4"]
+    assert parcels.due("carrier") == ["4"]
+    assert parcels.due("warehouse") == ["2", "3"]
+
+
+@pytest.mark.parametrize("call", ["progress_all", "due"])
+def test_a_tag_no_state_carries_is_refused(backend, table, call):
+    parcels = parcels_in_every_state(backend, table)
+
+    with pytest.raises(MachineError, match="no state of parcel is tagged 'wharehouse'; its tags are carrier"):
+        getattr(parcels, call)("wharehouse")
+    assert parcels.state_of(2) is Parcel.packing
 
 
 def test_check_marks_a_code_step_and_refuses_a_decide():

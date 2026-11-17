@@ -30,7 +30,10 @@ by whoever knows something new. A machine is three plain Python things.
 - **States** (`states.py`): declared like Django model fields, `pending = InitialState("...")`.
   `_StatesMeta` replaces each declaration with its stored value before the enum is built, so the
   class is a real `str` enum (`Order.paid == "paid"`, usable as a Pydantic type) whose members
-  keep their description and kind. The description is required; it's the state's definition.
+  keep their description, kind and tags. The description is required; it's the state's
+  definition. `tags=` makes a state a queue: `progress_all(tag)` and `due(tag)` try only the
+  entities in a state carrying the tag, so one worker does one kind of work (`Machine._tagged`;
+  a tag no state carries raises `MachineError`). `agfsm due` and `progress_all` take `--tag`.
 - **Steps**: a named function of the entity that returns the next state (or a `Decision`), or
   `None` for "not now"; or a `Decide`, which puts the question to a model (see *Decide*).
   `@check` (`machine.py`) marks a function step that only reads, so `due` may run it; it sets
