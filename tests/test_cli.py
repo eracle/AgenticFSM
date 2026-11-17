@@ -273,6 +273,9 @@ def test_a_tag_narrows_due_and_progress_all_and_show_prints_it(capsys, backend, 
     assert code == EXIT_OK
     assert [(m["entity"], m["to_state"]) for m in data] == [("2", "labelling"), ("3", "shipped")]
     assert "Packed: the warehouse labels it [printer, warehouse]" in run(capsys, *ORDERS, "show")[1]
+    code, data = run_json(capsys, *ORDERS, "progress_all", "--limit", "1")
+    assert [m["entity"] for m in data] == ["1"]
+    assert run(capsys, *ORDERS, "progress_all", "--limit", "0")[0] == EXIT_ERROR
     code, _, err = run(capsys, *ORDERS, "due", "--tag", "nobody")
     assert code == EXIT_ERROR
     assert "no state of parcel is tagged 'nobody'" in err

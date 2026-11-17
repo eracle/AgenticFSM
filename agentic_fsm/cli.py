@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         machine = load_machine(args.machine or settings.MACHINE)
         result = args.command(machine, args)
-    except (CommandError, MachineError, TransitionError, AlreadyStarted, LookupError) as error:
+    except (CommandError, ValueError, TransitionError, AlreadyStarted, LookupError) as error:
         print(f"agfsm: {error}", file=sys.stderr)
         return EXIT_ERROR
     print(json.dumps(result.data, default=_json_default, indent=2) if args.json else result.text)
@@ -94,6 +94,7 @@ def _parser() -> argparse.ArgumentParser:
 
     progress_all = commands.add_parser("progress_all", parents=[shared], help="at most one move for every entity")
     progress_all.add_argument("--tag", help="only the entities in a state carrying this tag")
+    progress_all.add_argument("--limit", type=int, help="stop once this many moves are made")
     progress_all.set_defaults(command=progress_all_command)
     return parser
 
@@ -218,7 +219,7 @@ def progress_all_command(machine: Machine, args) -> Result:
     """The moves made; with an entity whose step raised, those moves still print, each failure
     goes to stderr, and the exit code is 2."""
     try:
-        return _moves_result(machine.progress_all(args.tag))
+        return _moves_result(machine.progress_all(args.tag, limit=args.limit))
     except ProgressError as error:
         for entity_id, failure in error.failures.items():
             print(f"agfsm: {machine.name}:{entity_id}: {type(failure).__name__}: {failure}", file=sys.stderr)

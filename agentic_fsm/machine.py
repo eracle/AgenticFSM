@@ -234,7 +234,7 @@ class Machine:
                 break
         return moves
 
-    def progress_all(self, tag: str | None = None) -> list[Move]:
+    def progress_all(self, tag: str | None = None, *, limit: int | None = None) -> list[Move]:
         """Try the steps out of each non-final entity's state, in list order.
 
         The first step that doesn't return ``None`` decides, so each entity makes at most one move
@@ -243,12 +243,20 @@ class Machine:
         With ``tag``, only the entities in a state carrying it are tried: one worker per tag,
         each moving its own queue. A tag no state carries raises ``MachineError``.
 
+        With ``limit``, it stops once that many moves are made, oldest entity first: a worker
+        that takes a few from its queue each run. An entity that says "not now" or raises
+        doesn't count, so one stuck at the head never holds the queue.
+
         An entity whose step raises doesn't hold the others: its move is undone, the rest are
         tried, and ``ProgressError`` is raised at the end with the moves made and each failure.
         """
+        if limit is not None and limit < 1:
+            raise ValueError(f"limit must be at least 1, got {limit!r}")
         tagged = self._tagged(tag)
         moves, failures = [], {}
         for current in self.backend.all_current(self.name):
+            if limit is not None and len(moves) >= limit:
+                break
             try:
                 state = self._state(current)
                 if not self._exits.get(state) or (tagged is not None and state not in tagged):

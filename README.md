@@ -196,6 +196,10 @@ reason; nothing is written, and the session answers again.
 
   orders.progress_all("warehouse")   # only the orders in `paid`
   ```
+- **`limit=` takes a few from the queue.** `progress_all("warehouse", limit=1)` stops after
+  one move, oldest entity first, so a worker run every few minutes paces what it does. An
+  entity that says "not now" or raises doesn't count, so one stuck at the head never holds
+  the others.
 - **`progress` goes on until the entity rests**: a final state, or one whose steps all say "not
   now". It loads the entity afresh after each move, commits each move, and stops after a move
   that brings the entity back to a state it already left, so it never loops.
@@ -220,7 +224,7 @@ code can and no other. Each command calls one of the methods above.
 | `agfsm fire order:42 read_message --agent` | `orders.brief(42, "read_message")` |
 | `agfsm fire order:42 read_message --answer '{...}'` | `orders.fire(42, "read_message", answer=...)` |
 | `agfsm progress order:42` | `orders.progress(42)` |
-| `agfsm progress_all [--tag warehouse]` | `orders.progress_all()`, or `orders.progress_all("warehouse")` |
+| `agfsm progress_all [--tag warehouse] [--limit 1]` | `orders.progress_all()`, or `orders.progress_all("warehouse", limit=1)` |
 
 - **The machine** is named as `--machine package.module:name` (a module in the working directory
   works), or by the `MACHINE` setting: `export AGENTIC_FSM_MACHINE=shop.lifecycle:orders`.

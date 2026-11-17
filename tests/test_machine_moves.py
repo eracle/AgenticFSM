@@ -586,6 +586,33 @@ def test_due_with_a_tag_lists_only_the_entities_in_its_states(backend, table):
     assert parcels.due("warehouse") == ["2", "3"]
 
 
+def test_a_limit_stops_progress_all_after_that_many_moves_oldest_first(backend, table):
+    parcels = parcels_in_every_state(backend, table)
+
+    assert [m.entity for m in parcels.progress_all("warehouse", limit=1)] == ["2"]
+    assert parcels.state_of(3) is Parcel.labelling
+    assert [m.entity for m in parcels.progress_all(limit=2)] == ["1", "2"]
+
+
+def test_an_entity_that_does_not_move_does_not_count_toward_the_limit(backend, table):
+    parcels = parcels_in_every_state(backend, table)
+    table["1"].payment_cleared = False  # "not now"
+    del table["2"]  # loading it raises
+
+    with pytest.raises(ProgressError) as raised:
+        parcels.progress_all(limit=1)
+
+    assert [m.entity for m in raised.value.moves] == ["3"]
+    assert list(raised.value.failures) == ["2"]
+    assert parcels.state_of(4) is Parcel.shipped
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_a_limit_below_one_is_refused(orders, limit):
+    with pytest.raises(ValueError, match="limit must be at least 1"):
+        orders.progress_all(limit=limit)
+
+
 @pytest.mark.parametrize("call", ["progress_all", "due"])
 def test_a_tag_no_state_carries_is_refused(backend, table, call):
     parcels = parcels_in_every_state(backend, table)
