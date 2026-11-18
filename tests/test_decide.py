@@ -330,6 +330,96 @@ def test_a_brief_is_written_from_the_entity_in_hand(backend, table):
     assert brief.prompt == "Where does this message put the order?\nCancel it"
 
 
+# ── An effect that runs with the decision ──
+
+
+def machine_with_effect(backend, table, model, effect) -> Machine:
+    agent = Agent(model, output_type=MessageRead, instructions="You read customer messages.")
+    read_message = Decide(name="read_message", prompt=message_prompt, agent=agent, effect=effect)
+    orders = machine_with(backend, table, read_message)
+    table["1"] = new_order(message="Yes, please send it", notes=[])
+    orders.start(1)
+    return orders
+
+
+def note_the_reason(order, decision):
+    order.notes.append((decision.to, decision.reason))
+
+
+def test_an_effect_runs_with_the_models_decision_before_the_move(backend, table):
+    seen = []
+
+    def effect(order, decision):
+        seen.append((orders.state_of(1), decision.to, decision.reason))
+
+    orders = machine_with_effect(backend, table, model_saying(to="confirmed", reason="They said yes"), effect)
+
+    orders.fire(1, "read_message")
+
+    assert seen == [(Order.placed, Order.confirmed, "They said yes")]
+    assert orders.state_of(1) is Order.confirmed
+
+
+def test_an_effect_runs_with_an_answer_on_the_loaded_entity(backend, table):
+    orders = machine_with_effect(backend, table, None, note_the_reason)
+
+    orders.fire(1, "read_message", answer={"to": "cancelled", "reason": "Changed their mind"})
+
+    assert table["1"].notes == [(Order.cancelled, "Changed their mind")]
+
+
+def test_an_effect_that_raises_leaves_nothing_written(backend, table):
+    def effect(order, decision):
+        raise RuntimeError("the carrier is down")
+
+    orders = machine_with_effect(backend, table, model_saying(to="confirmed", reason="-"), effect)
+
+    with pytest.raises(RuntimeError, match="the carrier is down"):
+        orders.fire(1, "read_message")
+
+    assert orders.state_of(1) is Order.placed
+    assert len(orders.history(1)) == 1
+
+
+def test_an_effect_does_not_run_for_a_decision_the_rows_refuse(backend, table):
+    orders = machine_with_effect(backend, table, None, note_the_reason)
+
+    with pytest.raises(TransitionError):
+        orders.fire(1, "read_message", answer={"to": "shipped", "reason": "-"})
+
+    assert table["1"].notes == []
+
+
+def test_no_prompt_no_effect(backend, table):
+    orders = machine_with_effect(backend, table, model_saying(to="confirmed", reason="-"), note_the_reason)
+    table["1"].message = None
+
+    assert orders.fire(1, "read_message") is None
+    assert table["1"].notes == []
+
+
+def test_a_subclass_asks_the_model_its_own_way(backend, table):
+    class OwnWay(Decide):
+        decided_by = "llm:own"
+
+        def ask(self, prompt, entity, schema):
+            return schema(to="cancelled", reason=f"read: {prompt.splitlines()[-1]}")
+
+    orders = machine_with(backend, table, OwnWay(name="read_message", prompt=message_prompt, schema=MessageRead))
+    table["1"] = new_order(message="No thanks")
+    orders.start(1)
+
+    move = orders.fire(1, "read_message")
+
+    assert move.decided_by == "llm:own"
+    assert move.decision == {"to": "cancelled", "reason": "read: No thanks"}
+
+
+def test_an_effect_must_be_a_function():
+    with pytest.raises(TypeError, match="effect= must be a function"):
+        Decide(name="read_message", prompt=message_prompt, effect="send it")
+
+
 # ── Declaring a Decide ──
 
 

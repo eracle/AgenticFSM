@@ -224,12 +224,13 @@ class Machine:
         step in the model's place: its fields as a dict or a JSON object, or a bare state value.
         No model is called and the prompt function isn't run. An answer the schema or the
         step's rows don't allow raises ``TransitionError`` with the reason, and nothing is written.
+        A ``Decide``'s ``effect`` runs with the decision either way, before the move is written.
         """
         step = self._resolve_step(step)
         with self.backend.lock(self.name, str(entity_id)) as current:
             state, exit_ = self._exit_from(entity_id, current, step)
             if answer is not None:
-                return self._answer(current, state, exit_, answer)
+                return self._answer(current, state, exit_, answer, entity)
             return self._try(current, state, exit_, self._entity(current, entity))
 
     def brief(self, entity_id, step: Callable | str, *, entity=None) -> Brief:
@@ -357,15 +358,13 @@ class Machine:
         return None
 
     def _try(self, current: Current, state: States, exit_: _Exit, entity) -> Move | None:
-        if isinstance(exit_.step, Decide):
-            result, decided_by = exit_.step.run(entity, exit_.targets), exit_.step.decided_by
-        else:
-            result, decided_by = exit_.step(entity), "code"
+        decides = isinstance(exit_.step, Decide)
+        result = exit_.step.run(entity, exit_.targets) if decides else exit_.step(entity)
         if result is None:
             return None
-        return self._apply(current, state, exit_, result, decided_by)
+        return self._apply(current, state, exit_, result, exit_.step.decided_by if decides else "code", entity)
 
-    def _answer(self, current: Current, state: States, exit_: _Exit, answer) -> Move:
+    def _answer(self, current: Current, state: States, exit_: _Exit, answer, entity) -> Move:
         """Apply an answer given in the model's place; raise with the reason if it can't be."""
         step = exit_.step
         if not isinstance(step, Decide):
@@ -374,13 +373,20 @@ class Machine:
             decision = step.parse(answer_fields(answer), exit_.targets)
         except ValueError as error:
             raise TransitionError(f"the answer to {step.name} doesn't validate: {error}") from None
-        return self._apply(current, state, exit_, decision, "agent")
+        if step.effect is not None:
+            entity = self._entity(current, entity)
+        return self._apply(current, state, exit_, decision, "agent", entity)
 
-    def _apply(self, current: Current, state: States, exit_: _Exit, result, decided_by: str) -> Move:
-        """Write a step's result as a move; a result outside its rows is a bug and raises."""
+    def _apply(self, current: Current, state: States, exit_: _Exit, result, decided_by: str, entity) -> Move:
+        """Write a step's result as a move; a result outside its rows is a bug and raises.
+
+        A ``Decide``'s effect runs here, once the decision is allowed and before the move.
+        """
         decided = isinstance(result, Decision)
         target = result.to if decided else result
         self._check_target(state, exit_, target)
+        if isinstance(exit_.step, Decide) and exit_.step.effect is not None:
+            exit_.step.effect(entity, result)
         move = self.backend.move(
             Move(
                 machine=self.name,

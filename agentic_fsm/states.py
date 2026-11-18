@@ -109,6 +109,12 @@ class States(str, Enum, metaclass=_StatesMeta):
     """Base class for a machine's states."""
 
     @property
+    def declaration(self) -> State:
+        """The ``State`` this member was declared with: a subclass of ``State`` carries
+        whatever a caller's own kind of state adds."""
+        return type(self)._declarations[self.name]
+
+    @property
     def description(self) -> str:
         return type(self)._declarations[self.name].description
 

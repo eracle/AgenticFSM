@@ -29,6 +29,9 @@ class Order(States):
     cancelled = FinalState("Cancelled before it shipped")
 ```
 
+A state declared with a subclass of `State` keeps what the subclass adds: `Order.paid.declaration`
+is the object it was declared with.
+
 A step is a function of the entity. It returns the next state, or `None` for "not now".
 
 ```python
@@ -123,6 +126,26 @@ read_message = Decide(name="read_message", agent=reader, prompt=...)
 
 A function step may also return a `Decision` in place of a state, for code that calls
 `read_message.run(order)` itself or decides by rule and wants its reason logged.
+
+### An effect that goes with the decision
+
+When a decision carries something to act on (a note the model wrote for the customer), give the
+`Decide` an `effect`: a function of the entity and the decision.
+
+```python
+def send_note(order, decision):
+    if decision.note:
+        mail(order.customer, decision.note)
+
+read_message = Decide(name="read_message", prompt=..., schema=MessageRead, effect=send_note)
+```
+
+The effect runs once the decision is allowed by the step's rows and before the move is written,
+under the entity's lock, whether the model decided or an answer was given in its place. If it
+raises, nothing is written.
+
+A subclass that calls its model another way overrides `ask(prompt, entity, schema)` and
+`decided_by`.
 
 ### A session in the model's place
 

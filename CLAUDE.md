@@ -31,7 +31,8 @@ by whoever knows something new. A machine is three plain Python things.
   `_StatesMeta` replaces each declaration with its stored value before the enum is built, so the
   class is a real `str` enum (`Order.paid == "paid"`, usable as a Pydantic type) whose members
   keep their description, kind and tags. The description is required; it's the state's
-  definition. `tags=` makes a state a queue: `progress_all(tag)` and `due(tag)` try only the
+  definition. `declaration` gives back the `State` object a member was declared with, so a
+  caller's subclass of `State` can carry more. `tags=` makes a state a queue: `progress_all(tag)` and `due(tag)` try only the
   entities in a state carrying the tag, so one worker does one kind of work (`Machine._tagged`;
   a tag no state carries raises `MachineError`). `agfsm due` and `progress_all` take `--tag`.
   `progress_all(limit=)` (`--limit`) stops after that many moves, oldest entity first; an
@@ -52,7 +53,7 @@ by whoever knows something new. A machine is three plain Python things.
 | `start_all(ids)` | starts each id with no state yet (one `all_current` read, then a `start` each; a rival's `AlreadyStarted` is skipped), for entities another program makes |
 | `fire(id, step)` | runs one step (the function, the `Decide` or its name); returns the logged `Move`, or `None` for "not now" |
 | `fire(id, step, entity=)` | the same, on the entity already in hand instead of `load(id)` (`brief` takes it too) |
-| `fire(id, step, answer=)` | decides a `Decide` in the model's place; no model call, the prompt doesn't run |
+| `fire(id, step, answer=)` | decides a `Decide` in the model's place; no model call, the prompt doesn't run, its `effect` does |
 | `brief(id, step)` | the `Brief` a `Decide` would give the model: instructions, prompt, choices, schema, tools |
 | `progress(id)` | moves one entity until it rests: each round tries the steps out of its state in list order on the entity loaded afresh, and commits its move; it stops when no step moves it, or after a move back to a state this call already left |
 | `progress_all()` | per unfinished entity, tries the steps out of its state in list order and stops at the first that doesn't return `None`: at most one move per entity per call, each entity locked and committed on its own. An entity that raises is recorded and the rest tried; then `ProgressError(moves, failures)` |
@@ -88,13 +89,19 @@ definition; without one, `Decide` builds an agent for the `DECIDE_MODEL` setting
 its output type, with the model check deferred so no key is needed until it runs.
 
 - **Run**: `Decide.run(entity, targets)` calls the prompt function (falsy: "not now", no call),
-  then `agent.run_sync(prompt, deps=entity, output_type=<narrowed schema>)`. The narrowed schema
+  then `ask(prompt, entity, <narrowed schema>)`, which is `agent.run_sync(prompt, deps=entity,
+  output_type=...)`; a subclass that calls its model another way overrides `ask` and
+  `decided_by`. The narrowed schema
   is a copy whose `to` is a `Literal` of the step's targets out of the entity's state, with each
   state's description in the field's description. The machine checks the result against the rows
   afterwards either way. A model that keeps answering outside them raises Pydantic AI's
   `UnexpectedModelBehavior`, and nothing is logged.
 - **Answer**: `Decide.parse(answer, targets)` validates a dict, a JSON object or a bare state value
   against the same narrowed schema. The machine raises `TransitionError` on an invalid one.
+- **Effect**: `Decide(effect=)` is a function of the entity and the decision. `Machine._apply`
+  runs it after the target is checked against the rows and before `backend.move`, for a run
+  and for an answer alike (`_answer` loads the entity only when the step has one). One that
+  raises leaves nothing written.
 - **Logged**: `decided_by` is `llm:<provider>:<model>` for a run, `agent` for an answer and
   `code` for a function, and `Move.decision` holds the whole `Decision`.
 - `Brief.instructions` and `Brief.tools` read the agent's plain-text instructions (a private

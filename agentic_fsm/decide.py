@@ -56,6 +56,11 @@ class Decide:
     ``agent`` holds the whole model-side definition, and its output type must subclass
     ``Decision``. Without it, ``schema`` (default: a bare ``Decision``) is put to the
     ``DECIDE_MODEL`` setting's model.
+
+    ``effect`` is a function of the entity and the decision, for what must happen with the
+    decision (a message it wrote is sent): the machine runs it once the decision is allowed
+    and before the move is written, whether a model decided or an answer was given in its
+    place. An effect that raises leaves nothing written.
     """
 
     def __init__(
@@ -65,11 +70,14 @@ class Decide:
         prompt: Callable[[object], str | None],
         agent: Agent | None = None,
         schema: type[Decision] | None = None,
+        effect: Callable[[object, Decision], None] | None = None,
     ):
         if not isinstance(name, str) or not name:
             raise TypeError(f"a Decide needs a name, got {name!r}")
         if not callable(prompt):
             raise TypeError(f"{name}: prompt= must be a function of the entity")
+        if effect is not None and not callable(effect):
+            raise TypeError(f"{name}: effect= must be a function of the entity and the decision")
         if agent is not None and schema is not None:
             raise TypeError(f"{name}: pass agent= or schema=, not both; an agent's output type is its schema")
         if agent is None:
@@ -79,6 +87,7 @@ class Decide:
         self.name = name
         self.prompt = prompt
         self.agent = agent
+        self.effect = effect
         self.schema: type[Decision] = agent.output_type
         self._narrowed: dict[tuple[States, ...], type[Decision]] = {}
 
@@ -108,7 +117,15 @@ class Decide:
         prompt = self.prompt(entity)
         if not prompt:
             return None
-        return self.agent.run_sync(prompt, deps=entity, output_type=self._schema_for(targets)).output
+        return self.ask(prompt, entity, self._schema_for(targets))
+
+    def ask(self, prompt: str, entity, schema: type[Decision]) -> Decision:
+        """Put ``prompt`` to the agent and return its decision, shaped as ``schema``.
+
+        A subclass that runs its agent another way (a model chosen when it runs, an event
+        loop of its own) overrides this and ``decided_by``.
+        """
+        return self.agent.run_sync(prompt, deps=entity, output_type=schema).output
 
     def parse(self, answer, targets: tuple[States, ...] | None = None) -> Decision:
         """Validate an answer given in the model's place. Raises ``ValueError`` saying what's wrong."""

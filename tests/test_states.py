@@ -19,6 +19,22 @@ def test_each_state_keeps_its_description_and_kind():
     assert (Order.pending.kind, Order.paid.kind, Order.cancelled.kind) == ("initial", "state", "final")
 
 
+def test_a_state_gives_back_its_declaration():
+    class Perishable(State):
+        def __init__(self, description, *, keeps_days):
+            super().__init__(description)
+            self.keeps_days = keeps_days
+
+    class Crate(States):
+        packed = InitialState("Packed, in the cold room")
+        on_shelf = Perishable("On the shelf", keeps_days=3)
+        sold = FinalState("Sold")
+
+    assert Crate.on_shelf.declaration.keeps_days == 3
+    assert Crate.on_shelf.kind == "state"
+    assert type(Crate.packed.declaration) is InitialState
+
+
 def test_value_overrides_the_stored_value():
     class Legacy(States):
         new = InitialState("Just made", value="NEW")
