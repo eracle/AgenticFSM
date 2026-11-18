@@ -47,6 +47,9 @@ class StateBackend(BaseStateBackend):
         _append(move)
         return move
 
+    def on_commit(self, callback):
+        transaction.on_commit(callback)
+
     # ── Reads ──
 
     def current(self, machine, entity):

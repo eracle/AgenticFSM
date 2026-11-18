@@ -2,7 +2,7 @@
 
 from collections import defaultdict
 from contextlib import contextmanager
-from threading import Lock, RLock
+from threading import Lock, RLock, local
 
 from ..base.base import AlreadyStarted, BaseStateBackend, Current, Move, utc_now
 
@@ -13,6 +13,7 @@ class StateBackend(BaseStateBackend):
         self._current: dict[tuple[str, str], Current] = {}  # insertion order is start order
         self._lock = Lock()
         self._entity_locks: defaultdict[tuple[str, str], RLock] = defaultdict(RLock)
+        self._held = local()  # .callbacks: what waits for this thread's outermost lock to end
 
     # ── Writes ──
 
@@ -29,14 +30,30 @@ class StateBackend(BaseStateBackend):
     def lock(self, machine, entity):
         with self._lock:
             entity_lock = self._entity_locks[machine, entity]
-        with entity_lock:
-            yield self.current(machine, entity)
+        outermost = not hasattr(self._held, "callbacks")
+        if outermost:
+            self._held.callbacks = []
+        try:
+            with entity_lock:
+                yield self.current(machine, entity)
+        finally:
+            if outermost:
+                # Nothing is undone in memory, so they run even when the block raised.
+                for callback in self._held.__dict__.pop("callbacks"):
+                    callback()
 
     def move(self, move):
         with self._lock:
             self._current[move.machine, move.entity] = Current(move.entity, move.to_state)
             self._log.append(move)
         return move
+
+    def on_commit(self, callback):
+        callbacks = getattr(self._held, "callbacks", None)
+        if callbacks is None:
+            callback()
+        else:
+            callbacks.append(callback)
 
     # ── Reads ──
 

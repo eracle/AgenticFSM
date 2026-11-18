@@ -59,6 +59,16 @@ by whoever knows something new. A machine is three plain Python things.
 | `due()` | the unfinished entities a step could move now, writing nothing: under each entity's lock, steps in list order, a `@check` step runs, any other step makes the entity due untried |
 | `state_of(id)`, `in_state(state)`, `history(id)` | reads |
 | `graph()` | states and rows as data |
+| `on_move(listener)` | adds a listener, called with the `Move` after every move and start; returns it, so it decorates |
+
+**A listener is told once the move is committed.** `start` and `_apply` hand the move to
+`_announce`, which gives the backend's `on_commit` a callback: outside a lock it runs at once,
+inside one when the outermost lock's writes commit, and never if they are undone (a savepoint
+that rolls back drops its own). `_tell` calls the listeners in the order added; one that raises
+is logged on `agentic_fsm.machine` and nothing is raised, since the move happened. A move
+written straight through a backend (`backend.move`) tells no one. `tests/test_on_move.py` runs
+the Django backend with `transaction=True`: in pytest-django's usual test transaction nothing
+commits.
 
 **Every row in the log is a move that happened.** `fire` raises `TransitionError` and writes
 nothing when the move can't be made: an unknown step, an entity not started, a step that doesn't
@@ -136,14 +146,16 @@ a `base` module holding a `StateBackend`, picked by the package's dotted path (t
 setting, e.g. `AGENTIC_FSM_BACKEND=agentic_fsm.backends.django`, or `Machine(..., backend=)`; a
 machine with neither raises). `backends/__init__.py:get_backend` imports `<path>.base` on first use.
 
-- `backends/base/base.py`: `BaseStateBackend` (seven calls: `start`, `lock`, `move`, `current`,
-  `in_state`, `all_current`, `history`), plus the `Move` and `Current` dataclasses.
-- `backends/locmem/`: in memory, for tests; `lock` is a per-entity `RLock`.
+- `backends/base/base.py`: `BaseStateBackend` (eight calls: `start`, `lock`, `move`,
+  `on_commit`, `current`, `in_state`, `all_current`, `history`), plus the `Move` and `Current`
+  dataclasses.
+- `backends/locmem/`: in memory, for tests; `lock` is a per-entity `RLock`. Nothing is undone
+  there, so `on_commit` callbacks run when the thread's outermost lock ends, raised or not.
 - `backends/django/`: a Django app (`INSTALLED_APPS = ["agentic_fsm.backends.django"]`, label
   `agentic_fsm`) with two models, `LogEntry` (append-only) and `CurrentState` (one row per
   entity), and their migrations. `lock` is `transaction.atomic()` around a `select_for_update`
-  of the entity's current-state row; SQLite ignores the row lock. It's the only place Django is
-  imported.
+  of the entity's current-state row; SQLite ignores the row lock. `on_commit` is
+  `transaction.on_commit`. It's the only place Django is imported.
 - `backends/sqlalchemy/`: the same two tables as SQLAlchemy `Table`s (`tables.py`; names,
   columns, indexes and constraint match the Django models, and the two store the same values:
   SQL NULL for a move with no decision, and on SQLite the same datetime text;
@@ -153,7 +165,9 @@ machine with neither raises). `backends/__init__.py:get_backend` imports `<path>
   imports with no database configured. `create_tables()` makes what's missing. `lock` is
   `engine.begin()` around a `SELECT ... FOR UPDATE`, and the open connection sits in a
   `ContextVar` keyed by engine: `connection()` hands it to a step so its writes commit with the
-  move, a lock inside it takes a savepoint, and reads inside it go through it. `UTCDateTime`
+  move, a lock inside it takes a savepoint, and reads inside it go through it. A second
+  `ContextVar` holds the `on_commit` callbacks of the open lock, run after `engine.begin()`
+  commits. `UTCDateTime`
   gives back aware UTC datetimes on SQLite too. It's the only place SQLAlchemy is imported.
 
 Every backend keeps the same two things and the same rule: `move`, called inside `lock`,

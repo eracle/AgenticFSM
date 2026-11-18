@@ -8,6 +8,7 @@ else it returns is a bug, raised as ``TransitionError`` with nothing written. Ev
 is a move that happened.
 """
 
+import logging
 from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ from .conf import settings
 from .decide import Brief, Decide, Decision, answer_fields
 from .states import States
 
+logger = logging.getLogger(__name__)
 
 class MachineError(ValueError):
     """The machine's declaration is wrong; raised by ``Machine(...)``."""
@@ -115,6 +117,7 @@ class Machine:
         self.states = states
         self.name = name or states.__name__.lower()
         self.load = load
+        self._listeners: list[Callable[[Move], None]] = []
         self._backend = backend or settings.BACKEND
         if not self._backend:
             raise MachineError(f"{self.name} has no state backend: pass backend= or set {BACKEND_ENV}")
@@ -158,11 +161,39 @@ class Machine:
         """Every move logged for the entity, oldest first."""
         return self.backend.history(self.name, str(entity_id))
 
+    # ── Listeners ──
+
+    def on_move(self, listener: Callable[[Move], None]) -> Callable[[Move], None]:
+        """Call ``listener(move)`` after every move this machine makes, a start included.
+
+        Returns ``listener``, so it works as a decorator. A listener is told once the move is
+        committed, in the process that made it: one made inside a transaction that is later
+        undone is never told. Listeners are called in the order they were added. One that
+        raises is logged and the others are still told: the move happened, so nothing is
+        raised to whoever made it.
+        """
+        self._listeners.append(listener)
+        return listener
+
+    def _announce(self, move: Move) -> Move:
+        """Tell the listeners of ``move`` once it's committed; returns the move."""
+        if self._listeners:
+            self.backend.on_commit(lambda: self._tell(move))
+        return move
+
+    def _tell(self, move: Move):
+        for listener in self._listeners:
+            try:
+                listener(move)
+            except Exception:
+                name = getattr(listener, "__name__", repr(listener))
+                logger.exception("%s raised on %s:%s reaching %s", name, move.machine, move.entity, move.to_state)
+
     # ── Moves ──
 
     def start(self, entity_id) -> Move:
         """Put an entity in the initial state. Raises ``AlreadyStarted`` if it has a state."""
-        return self.backend.start(self.name, str(entity_id), self.initial.value)
+        return self._announce(self.backend.start(self.name, str(entity_id), self.initial.value))
 
     def start_all(self, entity_ids: Iterable) -> list[Move]:
         """Start each of ``entity_ids`` that has no state yet; returns the moves made, in order.
@@ -350,7 +381,7 @@ class Machine:
         decided = isinstance(result, Decision)
         target = result.to if decided else result
         self._check_target(state, exit_, target)
-        return self.backend.move(
+        move = self.backend.move(
             Move(
                 machine=self.name,
                 entity=current.entity,
@@ -362,6 +393,7 @@ class Machine:
                 decision=result.model_dump(mode="json") if decided else None,
             )
         )
+        return self._announce(move)
 
     def _check_target(self, state: States, exit_: _Exit, target):
         if not isinstance(target, self.states):

@@ -50,9 +50,14 @@ def new_order(**facts):
 
 @pytest.fixture(params=["locmem", pytest.param("django", marks=pytest.mark.django_db), "sqlalchemy"])
 def backend(request):
-    if request.param == "sqlalchemy":
+    return backend_named(request.param)
+
+
+def backend_named(name):
+    """A fresh backend: ``locmem``, ``django`` or ``sqlalchemy``."""
+    if name == "sqlalchemy":
         return sqlalchemy_backend()
-    return get_backend(f"agentic_fsm.backends.{request.param}")
+    return get_backend(f"agentic_fsm.backends.{name}")
 
 
 def sqlalchemy_backend():

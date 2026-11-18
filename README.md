@@ -157,6 +157,7 @@ reason; nothing is written, and the session answers again.
 | `orders.in_state(Order.paid)` | the ids of the entities in a state |
 | `orders.history(42)` | every move logged for the entity |
 | `orders.graph()` | the states and rows as data, for review |
+| `orders.on_move(listener)` | calls `listener(move)` after every move, once it's committed |
 
 - **Every row in the log is a move that happened.** A step's targets are the rows it sits on:
   if `payment_cleared` returns anything but `Order.paid`, that's a bug, `fire` raises
@@ -208,6 +209,27 @@ reason; nothing is written, and the session answers again.
   the Django and SQLAlchemy backends the step's own writes commit with the move.
 - **A step with an outside effect should be safe to run twice.** If it sends an email and the
   process dies before the move commits, the next call runs it again.
+
+## When an entity moves
+
+`on_move` adds a listener: a function called with the `Move` after every move the machine
+makes, a start included.
+
+```python
+@orders.on_move
+def tell_the_warehouse(move):
+    if move.to_state == Order.paid:
+        print(f"order {move.entity} is paid ({move.step}, decided by {move.decided_by})")
+```
+
+- **A listener is told once the move is committed**, so it reads the state the move left and
+  can make the next move itself. A move made inside a transaction of yours is told when that
+  transaction commits, and never if it's undone.
+- **A listener can't undo a move.** One that raises is logged (logger `agentic_fsm.machine`)
+  and the others are still told; `fire` returns the move as usual.
+- **It's told in the process that made the move**, and only once: if that process dies between
+  the commit and the call, nobody is told. For something that must follow every move whatever
+  happens, read the log (`history`, or the log table) from a job of your own.
 
 ## At the command line
 
@@ -290,7 +312,8 @@ tables are the Django backend's, so the two backends can keep machines in one da
 each other's.
 
 A backend of your own is a package whose `base` module has a `StateBackend` subclassing
-`agentic_fsm.BaseStateBackend`.
+`agentic_fsm.BaseStateBackend`. Its `on_commit(callback)` is what `on_move` rests on: it calls
+the callback once the writes made in the open lock are committed.
 
 ## Settings
 

@@ -29,6 +29,10 @@ LOG_FIELDS = ("machine", "entity", "step", "from_state", "to_state", "decided_by
 
 # The connection of each engine's open lock in this thread or task; none outside a lock.
 _open: ContextVar[dict[Engine, Connection]] = ContextVar("agentic_fsm_sqlalchemy_open", default={})
+# What waits for each engine's open lock to commit, in call order.
+_callbacks: ContextVar[dict[Engine, list[Callable[[], None]]]] = ContextVar(
+    "agentic_fsm_sqlalchemy_callbacks", default={}
+)
 
 
 class StateBackend(BaseStateBackend):
@@ -94,6 +98,13 @@ class StateBackend(BaseStateBackend):
         _append(connection, move)
         return move
 
+    def on_commit(self, callback):
+        callbacks = _callbacks.get().get(self.engine)
+        if callbacks is None:
+            callback()
+        else:
+            callbacks.append(callback)
+
     # ── Reads ──
 
     def current(self, machine, entity):
@@ -137,18 +148,33 @@ class StateBackend(BaseStateBackend):
 
     @contextmanager
     def _transaction(self):
-        """A transaction of its own, or a savepoint inside the lock already open here."""
+        """A transaction of its own, or a savepoint inside the lock already open here.
+
+        The callbacks ``on_commit`` was given inside run once the transaction has committed;
+        a savepoint that rolls back drops the ones given inside it.
+        """
         outer = _open.get().get(self.engine)
         if outer is not None:
-            with outer.begin_nested():
-                yield outer
+            callbacks = _callbacks.get()[self.engine]
+            kept = len(callbacks)
+            try:
+                with outer.begin_nested():
+                    yield outer
+            except BaseException:
+                del callbacks[kept:]
+                raise
             return
+        callbacks = []
         with self.engine.begin() as connection:
-            token = _open.set({**_open.get(), self.engine: connection})
+            open_token = _open.set({**_open.get(), self.engine: connection})
+            callbacks_token = _callbacks.set({**_callbacks.get(), self.engine: callbacks})
             try:
                 yield connection
             finally:
-                _open.reset(token)
+                _callbacks.reset(callbacks_token)
+                _open.reset(open_token)
+        for callback in callbacks:
+            callback()
 
     @contextmanager
     def _reading(self):

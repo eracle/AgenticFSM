@@ -6,6 +6,7 @@ that same lock, so a second caller waits and then reads the state the first left
 stores state, never the entity.
 """
 
+from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -60,6 +61,12 @@ class BaseStateBackend:
     def move(self, move: Move) -> Move:
         """Rewrite the entity's current state and log ``move``; called inside ``lock``."""
         raise NotImplementedError("subclasses of BaseStateBackend must override move()")
+
+    def on_commit(self, callback: Callable[[], None]) -> None:
+        """Call ``callback`` once what was written here is committed: right away outside a
+        ``lock``, and inside one when the outermost lock's writes commit. Never, if they are
+        undone."""
+        raise NotImplementedError("subclasses of BaseStateBackend must override on_commit()")
 
     # ── Reads ──
 
