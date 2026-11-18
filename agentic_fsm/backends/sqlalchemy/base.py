@@ -25,7 +25,7 @@ from ...conf import ENV_PREFIX, settings
 from ..base.base import AlreadyStarted, BaseStateBackend, Current, Move, utc_now
 from .tables import current_state, log_entry, metadata
 
-LOG_FIELDS = ("machine", "entity", "step", "from_state", "to_state", "decided_by", "at", "decision")
+LOG_FIELDS = ("machine", "entity", "from_state", "to_state", "decided_by", "at", "decision")
 
 # The connection of each engine's open lock in this thread or task; none outside a lock.
 _open: ContextVar[dict[Engine, Connection]] = ContextVar("agentic_fsm_sqlalchemy_open", default={})
@@ -65,7 +65,7 @@ class StateBackend(BaseStateBackend):
     # ── Writes ──
 
     def start(self, machine, entity, state):
-        move = Move(machine, entity, None, None, state, "code", utc_now())
+        move = Move(machine, entity, None, state, "code", utc_now())
         try:
             with self._transaction() as connection:
                 connection.execute(

@@ -8,7 +8,6 @@ class LogEntry(models.Model):
 
     machine = models.CharField(max_length=100)
     entity = models.CharField(max_length=255)
-    step = models.CharField(max_length=255, null=True)
     from_state = models.CharField(max_length=255, null=True)
     to_state = models.CharField(max_length=255)
     decided_by = models.CharField(max_length=255)

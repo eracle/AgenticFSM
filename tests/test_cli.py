@@ -6,11 +6,11 @@ import pytest
 from pydantic_ai import Agent, models
 from pydantic_ai.models.test import TestModel
 
-from agentic_fsm import Decide, Machine
+from agentic_fsm import Decide
 from agentic_fsm.cli import EXIT_ERROR, EXIT_OK, main, mermaid
 
 from . import machines
-from .conftest import new_order
+from .conftest import new_order, order_machine
 from .test_decide import MessageRead, machine_with, message_prompt
 from .test_decide import new_order as new_message_order
 
@@ -30,7 +30,7 @@ def cli_orders(monkeypatch, orders):
 def cli_messages(monkeypatch, backend, table):
     """The message machine with the default Decide: no agent of its own and no model key."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    read_message = Decide(name="read_message", prompt=message_prompt, schema=MessageRead)
+    read_message = Decide(prompt=message_prompt, schema=MessageRead)
     machine = machine_with(backend, table, read_message)
     monkeypatch.setattr(machines, "messages", machine)
     return machine
@@ -83,13 +83,13 @@ def test_a_machine_that_cannot_be_loaded_is_an_error(capsys, path, said):
 # ── show ──
 
 
-def test_show_prints_the_states_with_their_descriptions_then_the_rows(capsys, cli_orders):
+def test_show_prints_the_states_with_their_steps_and_descriptions_then_the_edges(capsys, cli_orders):
     _, out, _ = run(capsys, *ORDERS, "show")
-    states, rows = out.split("\n\n")[1:]
-    assert "pending    initial  Placed, not paid yet" in states
-    assert "delivered  final    The carrier delivered it" in states
-    assert rows.splitlines()[0].split() == ["from", "to", "step"]
-    assert ["pending", "paid", "payment_cleared"] in [line.split() for line in rows.splitlines()]
+    states, edges = out.split("\n\n")[1:]
+    assert "pending    initial  await_payment   Placed, not paid yet" in states
+    assert "delivered  final    -               The carrier delivered it" in states
+    assert edges.splitlines()[0].split() == ["from", "to"]
+    assert ["pending", "paid"] in [line.split() for line in edges.splitlines()]
 
 
 def test_show_json_is_the_graph(capsys, cli_orders):
@@ -102,8 +102,9 @@ def test_show_json_is_the_graph(capsys, cli_orders):
         "kind": "initial",
         "description": "Placed, not paid yet",
         "tags": [],
+        "step": "await_payment",
     }
-    assert ["pending", "paid", "payment_cleared"] in data["transitions"]
+    assert ["pending", "paid"] in data["edges"]
 
 
 def test_show_mermaid_is_a_state_diagram(capsys, cli_orders):
@@ -111,7 +112,7 @@ def test_show_mermaid_is_a_state_diagram(capsys, cli_orders):
     lines = out.splitlines()
     assert lines[0] == "stateDiagram-v2"
     assert "    [*] --> pending" in lines
-    assert "    pending --> paid : payment_cleared" in lines
+    assert "    pending --> paid" in lines
     assert "    pending : Placed, not paid yet" in lines
     assert "    delivered --> [*]" in lines
     assert out.strip() == mermaid(cli_orders.graph())
@@ -174,33 +175,42 @@ def test_list_refuses_a_value_that_is_not_a_state(capsys, cli_orders):
 # ── fire, progress and progress_all with code steps ──
 
 
-def test_fire_applies_a_code_step(capsys, cli_orders, table):
+def test_fire_runs_the_step_of_the_entitys_state(capsys, cli_orders, table):
     table["42"] = new_order(payment_cleared=True)
     cli_orders.start(42)
-    code, out, _ = run(capsys, *ORDERS, "fire", "order:42", "payment_cleared")
+    code, out, _ = run(capsys, *ORDERS, "fire", "order:42")
     assert code == EXIT_OK
-    assert out.strip() == "order:42 pending -> paid by payment_cleared, decided by code"
+    assert out.strip() == "order:42 pending -> paid, decided by code"
     assert cli_orders.state_of(42).value == "paid"
 
 
 def test_fire_says_not_now(capsys, cli_orders, table):
     table["42"] = new_order()
     cli_orders.start(42)
-    assert run(capsys, *ORDERS, "fire", "order:42", "payment_cleared")[1].strip() == "not now"
-    assert run_json(capsys, *ORDERS, "fire", "order:42", "payment_cleared") == (EXIT_OK, None)
+    assert run(capsys, *ORDERS, "fire", "order:42")[1].strip() == "not now"
+    assert run_json(capsys, *ORDERS, "fire", "order:42") == (EXIT_OK, None)
 
 
-@pytest.mark.parametrize("step", ["ship", "no_such_step"])
-def test_fire_of_a_step_that_cannot_be_tried_is_an_error(capsys, cli_orders, table, step):
-    table["42"] = new_order()
+def test_fire_of_a_finished_entity_is_an_error(capsys, cli_orders, table):
+    table["42"] = new_order(cancel_requested=True)
     cli_orders.start(42)
-    code, _, err = run(capsys, *ORDERS, "fire", "order:42", step)
+    cli_orders.fire(42)
+    code, _, err = run(capsys, *ORDERS, "fire", "order:42")
     assert code == EXIT_ERROR
-    assert step in err
+    assert "a final state" in err
+
+
+def test_fire_takes_no_step_name(capsys, cli_orders, table):
+    table["42"] = new_order(payment_cleared=True)
+    cli_orders.start(42)
+    with pytest.raises(SystemExit) as exit_:
+        main([*ORDERS, "fire", "order:42", "await_payment"])
+    assert exit_.value.code == EXIT_ERROR
+    assert cli_orders.state_of(42).value == "pending"
 
 
 def test_fire_of_an_entity_not_started_is_an_error(capsys, cli_orders):
-    code, _, err = run(capsys, *ORDERS, "fire", "order:42", "payment_cleared")
+    code, _, err = run(capsys, *ORDERS, "fire", "order:42")
     assert code == EXIT_ERROR
     assert "hasn't started" in err
 
@@ -221,36 +231,29 @@ def test_progress_moves_one_entity_until_it_rests(capsys, cli_orders, table):
     code, out, _ = run(capsys, *ORDERS, "progress", "order:42")
     assert code == EXIT_OK
     assert out.strip().splitlines() == [
-        "order:42 pending -> paid by payment_cleared, decided by code",
+        "order:42 pending -> paid, decided by code",
         "",
-        "order:42 paid -> shipped by ship, decided by code",
+        "order:42 paid -> shipped, decided by code",
     ]
     assert run(capsys, *ORDERS, "progress", "order:42")[1].strip() == "nothing moved"
 
 
-def test_a_step_outside_its_rows_is_an_error_and_writes_nothing(capsys, backend, table, monkeypatch):
-    from .conftest import TRANSITIONS, Order
-
-    def ship(order):
-        return Order.delivered  # not a row of ship's
-
-    rows = [row if row[2].__name__ != "ship" else (row[0], row[1], ship) for row in TRANSITIONS]
-    machine = Machine(Order, rows, load=lambda order_id: table[order_id], backend=backend)
+def test_a_step_outside_its_states_edges_is_an_error_and_writes_nothing(capsys, backend, table, monkeypatch):
+    machine = order_machine(backend, table, paid=lambda order: machine.states.delivered)  # paid has no edge there
     monkeypatch.setattr(machines, "orders", machine)
     table["1"] = new_order(payment_cleared=True)
     machine.start(1)
-    machine.fire(1, "payment_cleared")
+    machine.fire(1)
     code, _, err = run(capsys, *ORDERS, "progress_all")
     assert code == EXIT_ERROR
-    assert "may move paid only to shipped" in err
+    assert "paid has edges only to cancelled, shipped" in err
     assert machine.state_of(1).value == "paid"
 
 
 def test_due_lists_what_a_step_could_move_and_moves_nothing(capsys, backend, table, monkeypatch):
-    from .conftest import Order
-    from .test_machine_moves import CHECKED
+    from .test_machine_moves import checked_orders
 
-    machine = Machine(Order, CHECKED, load=lambda order_id: table[order_id], backend=backend)
+    machine = checked_orders(backend, table)
     monkeypatch.setattr(machines, "orders", machine)
     table["1"] = new_order(payment_cleared=True)
     table["2"] = new_order()
@@ -260,7 +263,7 @@ def test_due_lists_what_a_step_could_move_and_moves_nothing(capsys, backend, tab
 
     assert code == EXIT_OK
     assert out.strip() == "order:1"
-    assert machine.in_state(Order.pending) == ["1", "2"]
+    assert machine.in_state(machine.states.pending) == ["1", "2"]
 
 
 def test_a_tag_narrows_due_and_progress_all_and_show_prints_it(capsys, backend, table, monkeypatch):
@@ -292,15 +295,12 @@ def test_a_django_settings_module_not_installed_here_is_left_alone(capsys, cli_o
 
 
 def test_progress_all_prints_the_moves_made_beside_a_failure(capsys, backend, table, monkeypatch):
-    from .conftest import TRANSITIONS, Order
-
-    def payment_cleared(order):
+    def pending(order):
         if order.payment_cleared == "provider down":
             raise RuntimeError("the payment provider is down")
-        return Order.paid
+        return machine.states.paid
 
-    rows = [TRANSITIONS[0], (Order.pending, Order.paid, payment_cleared), *TRANSITIONS[2:]]
-    machine = Machine(Order, rows, load=lambda order_id: table[order_id], backend=backend)
+    machine = order_machine(backend, table, pending=pending)
     monkeypatch.setattr(machines, "orders", machine)
     table["1"], table["2"] = new_order(payment_cleared="provider down"), new_order()
     machine.start_all([1, 2])
@@ -308,7 +308,7 @@ def test_progress_all_prints_the_moves_made_beside_a_failure(capsys, backend, ta
     code, out, err = run(capsys, *ORDERS, "progress_all")
 
     assert code == EXIT_ERROR
-    assert out.strip() == "order:2 pending -> paid by payment_cleared, decided by code"
+    assert out.strip() == "order:2 pending -> paid, decided by code"
     assert err.strip() == "agfsm: order:1: RuntimeError: the payment provider is down"
 
 
@@ -318,14 +318,14 @@ def test_progress_all_prints_the_moves_made_beside_a_failure(capsys, backend, ta
 def test_a_decide_fires_from_the_cli_as_from_python(capsys, monkeypatch, backend, table):
     model = TestModel(custom_output_args={"to": "confirmed", "reason": "They said yes"})
     agent = Agent(model, output_type=MessageRead)
-    machine = machine_with(backend, table, Decide(name="read_message", prompt=message_prompt, agent=agent))
+    machine = machine_with(backend, table, Decide(prompt=message_prompt, agent=agent))
     monkeypatch.setattr(machines, "messages", machine)
     table["7"] = new_message_order(message="Yes, please send it")
     machine.start(7)
-    code, out, _ = run(capsys, *MESSAGES, "fire", "order:7", "read_message")
+    code, out, _ = run(capsys, *MESSAGES, "fire", "order:7")
     assert code == EXIT_OK
     assert out.splitlines() == [
-        "order:7 placed -> confirmed by read_message, decided by llm:test:test",
+        "order:7 placed -> confirmed, decided by llm:test:test",
         "  reason: They said yes",
     ]
 
@@ -334,14 +334,15 @@ def test_agent_then_answer_finishes_a_decide_with_no_model_key(capsys, cli_messa
     table["7"] = new_message_order(message="Please cancel it")
     cli_messages.start(7)
 
-    code, brief = run_json(capsys, *MESSAGES, "fire", "order:7", "read_message", "--agent")
+    code, brief = run_json(capsys, *MESSAGES, "fire", "order:7", "--agent")
     assert code == EXIT_OK
+    assert brief["state"] == "placed"
     assert brief["prompt"] == "Where does this message put the order?\nPlease cancel it"
     assert [value for value, _ in brief["choices"]] == ["confirmed", "cancelled"]
     assert brief["schema"]["properties"]["to"]["enum"] == ["confirmed", "cancelled"]
 
     answer = json.dumps({"to": "cancelled", "reason": "They asked to cancel"})
-    code, move = run_json(capsys, *MESSAGES, "fire", "order:7", "read_message", "--answer", answer)
+    code, move = run_json(capsys, *MESSAGES, "fire", "order:7", "--answer", answer)
     assert code == EXIT_OK
     assert (move["to_state"], move["decided_by"]) == ("cancelled", "agent")
     assert move["decision"] == {"to": "cancelled", "reason": "They asked to cancel"}
@@ -351,39 +352,39 @@ def test_agent_then_answer_finishes_a_decide_with_no_model_key(capsys, cli_messa
 def test_agent_prints_a_brief_to_read(capsys, cli_messages, table):
     table["7"] = new_message_order(message="Please cancel it")
     cli_messages.start(7)
-    _, out, _ = run(capsys, *MESSAGES, "fire", "order:7", "read_message", "--agent")
-    assert out.startswith("read_message on order:7\n")
+    _, out, _ = run(capsys, *MESSAGES, "fire", "order:7", "--agent")
+    assert out.startswith("order:7 in placed\n")
     assert "  cancelled  The customer called it off" in out
-    assert "agfsm fire order:7 read_message --answer" in out
+    assert "agfsm fire order:7 --answer" in out
 
 
 def test_agent_says_not_now_when_the_prompt_has_nothing_to_ask(capsys, cli_messages, table):
     table["7"] = new_message_order()
     cli_messages.start(7)
-    _, out, _ = run(capsys, *MESSAGES, "fire", "order:7", "read_message", "--agent")
+    _, out, _ = run(capsys, *MESSAGES, "fire", "order:7", "--agent")
     assert out.startswith("not now")
 
 
-def test_an_answer_outside_the_rows_goes_back_to_the_session(capsys, cli_messages, table):
+def test_an_answer_outside_the_edges_goes_back_to_the_session(capsys, cli_messages, table):
     table["7"] = new_message_order(message="Ship it")
     cli_messages.start(7)
     answer = json.dumps({"to": "shipped", "reason": "They want it"})
-    code, out, err = run(capsys, *MESSAGES, "fire", "order:7", "read_message", "--answer", answer)
+    code, out, err = run(capsys, *MESSAGES, "fire", "order:7", "--answer", answer)
     assert (code, out) == (EXIT_ERROR, "")
-    assert err.startswith("agfsm: the answer to read_message doesn't validate")
+    assert err.startswith("agfsm: the answer for placed doesn't validate")
     assert cli_messages.state_of(7).value == "placed"
     assert len(cli_messages.history(7)) == 1
 
 
-def test_agent_on_a_code_step_is_an_error(capsys, cli_orders, table):
+def test_agent_on_a_state_whose_step_is_code_is_an_error(capsys, cli_orders, table):
     table["42"] = new_order()
     cli_orders.start(42)
-    code, _, err = run(capsys, *ORDERS, "fire", "order:42", "payment_cleared", "--agent")
+    code, _, err = run(capsys, *ORDERS, "fire", "order:42", "--agent")
     assert code == EXIT_ERROR
-    assert "is code, not a Decide" in err
+    assert "pending's step is code that doesn't only read" in err
 
 
 def test_agent_and_answer_are_not_given_together(capsys, cli_messages):
     with pytest.raises(SystemExit) as exit_:
-        main([*MESSAGES, "fire", "order:7", "read_message", "--agent", "--answer", "cancelled"])
+        main([*MESSAGES, "fire", "order:7", "--agent", "--answer", "cancelled"])
     assert exit_.value.code == EXIT_ERROR

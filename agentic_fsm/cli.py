@@ -1,8 +1,8 @@
 """``agfsm``: a machine's moves at the command line.
 
     agfsm --machine shop.lifecycle:orders show
-    agfsm fire order:42 read_message --agent
-    agfsm fire order:42 read_message --answer '{"to": "cancelled", "reason": "..."}'
+    agfsm fire order:42 --agent
+    agfsm fire order:42 --answer '{"to": "cancelled", "reason": "..."}'
 
 Each command loads one machine and calls one of its methods, so an agent at the CLI can make
 every move the code can and no other. ``--json`` prints the result as data. The exit code is 0
@@ -64,7 +64,7 @@ def _parser() -> argparse.ArgumentParser:
     _add_common(shared, default=argparse.SUPPRESS)  # given after the command, without erasing one given before
     commands = parser.add_subparsers(required=True, metavar="command")
 
-    show = commands.add_parser("show", parents=[shared], help="the states and the transition rows")
+    show = commands.add_parser("show", parents=[shared], help="the states, their steps and the edges")
     show.add_argument("--mermaid", action="store_true", help="as a Mermaid state diagram")
     show.set_defaults(command=show_command)
 
@@ -76,13 +76,12 @@ def _parser() -> argparse.ArgumentParser:
     listing.add_argument("state", help="a state's stored value")
     listing.set_defaults(command=list_command)
 
-    due = commands.add_parser("due", parents=[shared], help="the entities a step could move now")
+    due = commands.add_parser("due", parents=[shared], help="the entities their state's step could move now")
     due.add_argument("--tag", help="only the entities in a state carrying this tag")
     due.set_defaults(command=due_command)
 
-    fire = commands.add_parser("fire", parents=[shared], help="run one step on one entity")
+    fire = commands.add_parser("fire", parents=[shared], help="run the step of one entity's state")
     fire.add_argument("entity", help="<machine>:<id>")
-    fire.add_argument("step", help="the step's name")
     in_place = fire.add_mutually_exclusive_group()
     in_place.add_argument("--agent", action="store_true", help="print what the model would be given")
     in_place.add_argument("--answer", help="decide in the model's place: a JSON object or a state")
@@ -203,9 +202,9 @@ def due_command(machine: Machine, args) -> Result:
 def fire_command(machine: Machine, args) -> Result:
     entity_id = _entity_id(machine, args.entity)
     if args.agent:
-        brief = machine.brief(entity_id, args.step)
+        brief = machine.brief(entity_id)
         return Result(asdict(brief), _brief_text(brief, args.entity))
-    move = machine.fire(entity_id, args.step, answer=args.answer)
+    move = machine.fire(entity_id, answer=args.answer)
     if move is None:
         return Result(None, "not now")
     return _move_result(move)
@@ -249,9 +248,9 @@ def _moves_result(moves: list[Move]) -> Result:
 
 
 def _graph_text(graph: Graph) -> str:
-    states = _columns([(s.value, s.kind, _described(s)) for s in graph.states])
-    rows = _columns([("from", "to", "step"), *graph.transitions])
-    return f"{graph.name}\n\n{states}\n\n{rows}"
+    states = _columns([(s.value, s.kind, s.step or "-", _described(s)) for s in graph.states])
+    edges = _columns([("from", "to"), *graph.edges])
+    return f"{graph.name}\n\n{states}\n\n{edges}"
 
 
 def _described(state) -> str:
@@ -264,16 +263,16 @@ def mermaid(graph: Graph) -> str:
     lines = ["stateDiagram-v2"]
     lines += [f"    {s.value} : {s.description}" for s in graph.states]
     lines += [f"    [*] --> {s.value}" for s in graph.states if s.kind == "initial"]
-    lines += [f"    {source} --> {target} : {step}" for source, target, step in graph.transitions]
+    lines += [f"    {source} --> {target}" for source, target in graph.edges]
     lines += [f"    {s.value} --> [*]" for s in graph.states if s.kind == "final"]
     return "\n".join(lines)
 
 
 def _move_text(move: Move) -> str:
     entity = f"{move.machine}:{move.entity}"
-    if move.step is None:
+    if move.from_state is None:
         return f"{entity} started in {move.to_state}"
-    line = f"{entity} {move.from_state} -> {move.to_state} by {move.step}, decided by {move.decided_by}"
+    line = f"{entity} {move.from_state} -> {move.to_state}, decided by {move.decided_by}"
     details = {k: v for k, v in (move.decision or {}).items() if k != "to"}
     return "\n".join([line, *(f"  {k}: {v}" for k, v in details.items())])
 
@@ -281,7 +280,7 @@ def _move_text(move: Move) -> str:
 def _brief_text(brief, entity: str) -> str:
     """The brief laid out for a session to read, ending with how to answer it."""
     if brief.prompt is None:
-        return f"not now: {brief.step} has nothing to ask about {entity}"
+        return f"not now: there is nothing to ask about {entity} in {brief.state}"
     sections = [
         ("Instructions", "\n\n".join(brief.instructions) or "(none)"),
         ("Prompt", brief.prompt),
@@ -290,9 +289,9 @@ def _brief_text(brief, entity: str) -> str:
     ]
     if brief.tools:
         sections.append(("The model's tools (gather the same facts with your own)", _columns(brief.tools)))
-    sections.append(("Answer with", f"agfsm fire {entity} {brief.step} --answer '<JSON object>'"))
+    sections.append(("Answer with", f"agfsm fire {entity} --answer '<JSON object>'"))
     body = "\n\n".join(f"{title}:\n{_indent(text)}" for title, text in sections)
-    return f"{brief.step} on {entity}\n\n{body}"
+    return f"{entity} in {brief.state}\n\n{body}"
 
 
 def _columns(rows) -> str:

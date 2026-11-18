@@ -1,11 +1,12 @@
-"""A machine: a ``States`` class, one list of ``(from, to, step)`` rows, and a state backend.
+"""A machine: a ``States`` class whose states each name their step, one list of ``(from, to)``
+edges, and a state backend.
 
-    orders = Machine(Order, TRANSITIONS, load=get_order)
+    orders = Machine(Order, EDGES, load=get_order)
 
-A step is a function of the entity that returns the next state, or ``None`` for "not now", or a
-``Decide`` that puts the question to a model. Its allowed targets are the rows it sits on; anything
-else it returns is a bug, raised as ``TransitionError`` with nothing written. Every row in the log
-is a move that happened.
+A state's step is a function of the entity that returns the next state, or ``None`` for "not
+now", or another step to hand over to (a ``Decide`` puts the question to a model). Its allowed
+targets are the states its state has an edge to; anything else it returns is a bug, raised as
+``TransitionError`` with nothing written. Every row in the log is a move that happened.
 """
 
 import logging
@@ -19,17 +20,21 @@ from .backends.base.base import AlreadyStarted, BaseStateBackend, Current, Move,
 from .conf import settings
 from .decide import Brief, Decide, Decision, answer_fields
 from .states import States
+from .steps import Step
 
 logger = logging.getLogger(__name__)
+
+ANSWERED_BY = "agent"
+
 
 class MachineError(ValueError):
     """The machine's declaration is wrong; raised by ``Machine(...)``."""
 
 
 class TransitionError(Exception):
-    """A move that can't be made: unknown step, an entity not started, a step that doesn't leave
-    the entity's state, a result outside the step's rows, or an answer that doesn't validate.
-    Nothing is written."""
+    """A move that can't be made: an entity not started or in a final state, a result outside
+    the state's edges, an answer that doesn't validate or that the state's code leaves no room
+    for. Nothing is written."""
 
 
 class ProgressError(Exception):
@@ -46,32 +51,12 @@ class ProgressError(Exception):
         super().__init__(f"{len(failures)} of the entities raised, {len(moves)} moved: {listed}")
 
 
-CHECK_ATTRIBUTE = "agentic_fsm_check"
-
-
-def check(step: Callable) -> Callable:
-    """Mark a code step as a check: it only reads the entity, so ``Machine.due`` may run it.
-
-    Used as a decorator. A ``Decide`` can't be one: running it calls a model.
-    """
-    if isinstance(step, Decide) or not callable(step):
-        raise TypeError(f"{step!r} can't be a check: only a code step that only reads can")
-    setattr(step, CHECK_ATTRIBUTE, True)
-    return step
-
-
-def is_check(step: Callable) -> bool:
-    """Whether ``step`` was marked with ``check``."""
-    return getattr(step, CHECK_ATTRIBUTE, False) is True
-
-
 @dataclass(frozen=True)
 class Edge:
-    """One row of the transition list, with a tuple ``from`` expanded."""
+    """One pair of the edge list, with a tuple ``from`` expanded."""
 
     from_state: States
     to_state: States
-    step: Callable
 
 
 @dataclass(frozen=True)
@@ -81,23 +66,16 @@ class StateInfo:
     kind: str
     description: str
     tags: tuple[str, ...] = ()
+    step: str | None = None  # what the state's step is called; None for a final state
 
 
 @dataclass(frozen=True)
 class Graph:
-    """A machine as data, for review: its states and its rows."""
+    """A machine as data, for review: its states and its edges."""
 
     name: str
     states: list[StateInfo]
-    transitions: list[tuple[str, str, str]]  # (from, to, step name)
-
-
-@dataclass(frozen=True)
-class _Exit:
-    """One step out of one state, with the targets its rows give it there."""
-
-    step: Callable
-    targets: tuple[States, ...]
+    edges: list[tuple[str, str]]  # (from, to)
 
 
 class Machine:
@@ -106,7 +84,7 @@ class Machine:
     def __init__(
         self,
         states: type[States],
-        transitions: Iterable,
+        edges: Iterable,
         *,
         load: Callable[[str], object],
         backend: BaseStateBackend | str | None = None,
@@ -121,13 +99,13 @@ class Machine:
         self._backend = backend or settings.BACKEND
         if not self._backend:
             raise MachineError(f"{self.name} has no state backend: pass backend= or set {BACKEND_ENV}")
-        self.edges = _expand(states, list(transitions))
-        self.steps = _index_steps(self.edges)
+        self.edges = _expand(states, list(edges))
         self.initial = _the_initial_state(states)
-        self._exits = _exits_by_state(self.edges)
-        _check_finals_have_no_rows(self._exits)
-        _check_nothing_stuck(states, self._exits)
-        _check_all_reachable(states, self.initial, self._exits)
+        self._targets = _targets_by_state(self.edges)
+        _check_steps(states)
+        _check_finals_have_no_edges(self._targets)
+        _check_nothing_stuck(states, self._targets)
+        _check_all_reachable(states, self.initial, self._targets)
 
     @cached_property
     def backend(self) -> BaseStateBackend:
@@ -137,13 +115,16 @@ class Machine:
     # ── Review ──
 
     def graph(self) -> Graph:
-        """The states with their descriptions and every row, in declaration order."""
+        """The states with their descriptions and steps, and every edge, in declaration order."""
         return Graph(
             name=self.name,
             states=[
-                StateInfo(s.name, s.value, s.kind, s.description, tuple(sorted(s.tags))) for s in self.states
+                StateInfo(
+                    s.name, s.value, s.kind, s.description, tuple(sorted(s.tags)), s.step.label if s.step else None
+                )
+                for s in self.states
             ],
-            transitions=[(e.from_state.value, e.to_state.value, _step_name(e.step)) for e in self.edges],
+            edges=[(e.from_state.value, e.to_state.value) for e in self.edges],
         )
 
     # ── Reads ──
@@ -214,46 +195,49 @@ class Machine:
                 continue
         return moves
 
-    def fire(self, entity_id, step: Callable | str, *, entity=None, answer=None) -> Move | None:
-        """Run one step on one entity: the logged move, or ``None`` if the step said "not now".
+    def fire(self, entity_id, *, entity=None, answer=None) -> Move | None:
+        """Run the step of the entity's state: the logged move, or ``None`` if it said "not now".
 
         The entity is locked from the read of its state to the write of the move, so a second
         caller waits and then reads the state this one left. ``entity`` is the entity already in
         hand, given to the step instead of ``load(id)``: a caller walking its own rows, or one
-        that has set on the entity what it chose for the step. ``answer`` decides a ``Decide``
-        step in the model's place: its fields as a dict or a JSON object, or a bare state value.
-        No model is called and the prompt function isn't run. An answer the schema or the
-        step's rows don't allow raises ``TransitionError`` with the reason, and nothing is written.
-        A ``Decide``'s ``effect`` runs with the decision either way, before the move is written.
-        """
-        step = self._resolve_step(step)
-        with self.backend.lock(self.name, str(entity_id)) as current:
-            state, exit_ = self._exit_from(entity_id, current, step)
-            if answer is not None:
-                return self._answer(current, state, exit_, answer, entity)
-            return self._try(current, state, exit_, self._entity(current, entity))
+        that has set on the entity what it chose for the step.
 
-    def brief(self, entity_id, step: Callable | str, *, entity=None) -> Brief:
-        """What a ``Decide`` step would give the model for this entity, for a session to decide instead.
+        ``answer`` decides in the model's place: a ``Decide``'s fields as a dict or a JSON
+        object, or a bare state value. No model is called and the prompt function isn't run.
+        When the state's step is a function that hands over to a ``Decide``, the function runs
+        first and the answer is taken only if it hands over: one that moves the entity itself,
+        or says "not now", refuses the answer. Only a step that only reads (``@check``) is run
+        this way. An answer that is refused, or that the schema or the state's edges don't
+        allow, raises ``TransitionError`` with the reason, and nothing is written. A
+        ``Decide``'s ``effect`` runs with the decision either way, before the move is written.
+        """
+        with self.backend.lock(self.name, str(entity_id)) as current:
+            state = self._unfinished_state(entity_id, current)
+            if answer is not None:
+                return self._answer(current, state, answer, entity)
+            return self._try(current, state, self._entity(current, entity))
+
+    def brief(self, entity_id, *, entity=None) -> Brief:
+        """What a ``Decide`` would give the model for this entity, for a session to decide instead.
 
         Returns a ``Brief``: the instructions, the prompt, the choices with their descriptions,
         the answer's JSON Schema and the agent's tools. Answer it with ``fire(..., answer=)``.
-        ``entity`` is as for ``fire``.
+        The ``Decide`` is the step of the entity's state, or the one its function hands over
+        to, found as ``fire(..., answer=)`` finds it. ``entity`` is as for ``fire``.
         """
-        step = self._resolve_step(step)
         current = self.backend.current(self.name, str(entity_id))
-        state, exit_ = self._exit_from(entity_id, current, step)
-        if not isinstance(exit_.step, Decide):
-            raise TransitionError(f"{_step_name(exit_.step)} is code, not a Decide: there is nothing to brief")
-        return exit_.step.brief(self._entity(current, entity), exit_.targets)
+        state = self._unfinished_state(entity_id, current)
+        decide, entity = self._decide_for(current, state, entity)
+        return decide.brief(self._entity(current, entity), state, self._targets[state])
 
     def progress(self, entity_id) -> list[Move]:
         """Move one entity until it rests; returns the moves made, oldest first.
 
-        Each round tries the steps out of the entity's state in list order, as ``progress_all``
-        does, on the entity loaded afresh, and commits its move. It rests when no step moves it
-        (a final state, or every step says "not now"), and stops after a move that brings it back
-        to a state this call already left, so it makes at most as many moves as there are states.
+        Each round runs the step of the entity's state on the entity loaded afresh, and commits
+        its move. It rests when the step doesn't move it (a final state, or "not now"), and
+        stops after a move that brings it back to a state this call already left, so it makes
+        at most as many moves as there are states.
         """
         entity_id = str(entity_id)
         if self.backend.current(self.name, entity_id) is None:
@@ -267,10 +251,9 @@ class Machine:
         return moves
 
     def progress_all(self, tag: str | None = None, *, limit: int | None = None) -> list[Move]:
-        """Try the steps out of each non-final entity's state, in list order.
+        """Run the step of each non-final entity's state: at most one move per entity per call.
 
-        The first step that doesn't return ``None`` decides, so each entity makes at most one move
-        per call. Each entity is locked and committed on its own. Returns the moves made.
+        Each entity is locked and committed on its own. Returns the moves made.
 
         With ``tag``, only the entities in a state carrying it are tried: one worker per tag,
         each moving its own queue. A tag no state carries raises ``MachineError``.
@@ -291,7 +274,7 @@ class Machine:
                 break
             try:
                 state = self._state(current)
-                if not self._exits.get(state) or (tagged is not None and state not in tagged):
+                if state.is_final or (tagged is not None and state not in tagged):
                     continue
                 move = self._one_move(current.entity)
             except Exception as error:
@@ -304,20 +287,20 @@ class Machine:
         return moves
 
     def due(self, tag: str | None = None) -> list[str]:
-        """The unfinished entities a step could move now; nothing is moved or written.
+        """The unfinished entities their state's step could move now; nothing is moved or written.
 
         For a scheduler deciding whether a run is worth starting. Each entity is tried as
-        ``progress_all`` would try it, under its lock: a ``check`` step runs and says whether it
-        would move the entity; any other step (an outside effect, a ``Decide``) can't be tried
-        without its effect, so an entity it leaves is due once the checks before it say "not
-        now". With ``tag``, only the entities in a state carrying it, as ``progress_all(tag)``
-        would try. Returns the entity ids, oldest first.
+        ``progress_all`` would try it, under its lock: a step that only reads (a ``@check``
+        function) runs and says whether it would move the entity; any other step (an outside
+        effect, a ``Decide``) can't be tried without its effect, so an entity is due when its
+        state's step is one, or hands over to one. With ``tag``, only the entities in a state
+        carrying it, as ``progress_all(tag)`` would try. Returns the entity ids, oldest first.
         """
         tagged = self._tagged(tag)
         return [
             current.entity
             for current in self.backend.all_current(self.name)
-            if self._exits.get(state := self._state(current))
+            if not (state := self._state(current)).is_final
             and (tagged is None or state in tagged)
             and self._would_move(current.entity)
         ]
@@ -333,65 +316,89 @@ class Machine:
         return tagged
 
     def _would_move(self, entity_id: str) -> bool:
-        """Under the entity's lock, whether the first step to answer would move it."""
-        with self.backend.lock(self.name, entity_id) as current:
-            entity, loaded = None, False
-            for exit_ in self._exits[self._state(current)].values():
-                if not is_check(exit_.step):
-                    return True
-                if not loaded:
-                    entity, loaded = self.load(current.entity), True
-                if exit_.step(entity) is not None:
-                    return True
-        return False
-
-    def _one_move(self, entity_id: str) -> Move | None:
-        """Under the entity's lock, the first move a step out of its state makes, if any."""
+        """Under the entity's lock, whether its state's step would move it."""
         with self.backend.lock(self.name, entity_id) as current:
             state = self._state(current)
-            exits = self._exits.get(state, {}).values()
-            entity = self.load(current.entity) if exits else None
-            for exit_ in exits:
-                move = self._try(current, state, exit_, entity)
-                if move is not None:
-                    return move
-        return None
+            if state.is_final:
+                return False
+            step, entity = state.step, None
+            while step.reads_only:
+                entity = self._entity(current, entity)
+                result = step.run(entity, self._targets[state])
+                if not isinstance(result, Step):
+                    return result is not None
+                step = result
+        return True
 
-    def _try(self, current: Current, state: States, exit_: _Exit, entity) -> Move | None:
-        decides = isinstance(exit_.step, Decide)
-        result = exit_.step.run(entity, exit_.targets) if decides else exit_.step(entity)
+    def _one_move(self, entity_id: str) -> Move | None:
+        """Under the entity's lock, the move its state's step makes, if any."""
+        with self.backend.lock(self.name, entity_id) as current:
+            state = self._state(current)
+            if state.is_final:
+                return None
+            return self._try(current, state, self.load(current.entity))
+
+    def _try(self, current: Current, state: States, entity) -> Move | None:
+        """Run the state's step and each step it hands over to; write the move the last one decides."""
+        step, targets = state.step, self._targets[state]
+        result = step.run(entity, targets)
+        while isinstance(result, Step):
+            step = result
+            result = step.run(entity, targets)
         if result is None:
             return None
-        return self._apply(current, state, exit_, result, exit_.step.decided_by if decides else "code", entity)
+        return self._apply(current, state, step, result, step.decided_by, entity)
 
-    def _answer(self, current: Current, state: States, exit_: _Exit, answer, entity) -> Move:
+    def _answer(self, current: Current, state: States, answer, entity) -> Move:
         """Apply an answer given in the model's place; raise with the reason if it can't be."""
-        step = exit_.step
-        if not isinstance(step, Decide):
-            raise TransitionError(f"{_step_name(step)} is code, not a Decide: it takes no answer")
+        decide, entity = self._decide_for(current, state, entity)
         try:
-            decision = step.parse(answer_fields(answer), exit_.targets)
+            decision = decide.parse(answer_fields(answer), self._targets[state])
         except ValueError as error:
-            raise TransitionError(f"the answer to {step.name} doesn't validate: {error}") from None
-        if step.effect is not None:
+            raise TransitionError(f"the answer for {state.value} doesn't validate: {error}") from None
+        if decide.effect is not None:
             entity = self._entity(current, entity)
-        return self._apply(current, state, exit_, decision, "agent", entity)
+        return self._apply(current, state, decide, decision, ANSWERED_BY, entity)
 
-    def _apply(self, current: Current, state: States, exit_: _Exit, result, decided_by: str, entity) -> Move:
-        """Write a step's result as a move; a result outside its rows is a bug and raises.
+    def _decide_for(self, current: Current, state: States, entity) -> tuple[Decide, object]:
+        """The ``Decide`` that decides for the entity in ``state``, and the entity if it was loaded.
 
-        A ``Decide``'s effect runs here, once the decision is allowed and before the move.
+        It is the state's step, or the one that step hands over to. A step is run to find out
+        only if it only reads; one that settles the move itself leaves nothing to decide.
+        """
+        step, subject = state.step, f"{self.name}:{current.entity}"
+        while not isinstance(step, Decide):
+            if not step.reads_only:
+                raise TransitionError(
+                    f"{state.value}'s step is code that doesn't only read: no model decides {subject} there"
+                )
+            entity = self._entity(current, entity)
+            result = step.run(entity, self._targets[state])
+            if result is None:
+                raise TransitionError(f'{state.value}\'s step says "not now" for {subject}: there is nothing to decide')
+            if not isinstance(result, Step):
+                target = result.to if isinstance(result, Decision) else result
+                raise TransitionError(
+                    f"{state.value}'s step moves {subject} to {getattr(target, 'value', target)} itself: "
+                    "there is nothing to decide"
+                )
+            step = result
+        return step, entity
+
+    def _apply(self, current: Current, state: States, step: Step, result, decided_by: str, entity) -> Move:
+        """Write a step's result as a move; a result outside the state's edges is a bug and raises.
+
+        The step's effect runs here, once the result is allowed and before the move.
         """
         decided = isinstance(result, Decision)
         target = result.to if decided else result
-        self._check_target(state, exit_, target)
-        if isinstance(exit_.step, Decide) and exit_.step.effect is not None:
-            exit_.step.effect(entity, result)
+        self._check_target(state, target)
+        if step.effect is not None:
+            step.effect(entity, result)
         move = self.backend.move(
             Move(
                 machine=self.name,
                 entity=current.entity,
-                step=_step_name(exit_.step),
                 from_state=state.value,
                 to_state=target.value,
                 decided_by=decided_by,
@@ -401,15 +408,15 @@ class Machine:
         )
         return self._announce(move)
 
-    def _check_target(self, state: States, exit_: _Exit, target):
+    def _check_target(self, state: States, target):
         if not isinstance(target, self.states):
             raise TransitionError(
-                f"{_step_name(exit_.step)} returned {target!r}, which is not a state of {self.states.__name__}"
+                f"{state.value}'s step returned {target!r}, which is not a state of {self.states.__name__}"
             )
-        if target not in exit_.targets:
-            allowed = ", ".join(t.value for t in exit_.targets)
+        if target not in self._targets[state]:
+            allowed = ", ".join(t.value for t in self._targets[state])
             raise TransitionError(
-                f"{_step_name(exit_.step)} returned {target.value}, but may move {state.value} only to {allowed}"
+                f"{state.value}'s step returned {target.value}, but {state.value} has edges only to {allowed}"
             )
 
     # ── Lookups ──
@@ -417,22 +424,14 @@ class Machine:
     def _entity(self, current: Current, entity):
         return self.load(current.entity) if entity is None else entity
 
-    def _exit_from(self, entity_id, current: Current | None, step: Callable) -> tuple[States, _Exit]:
-        """The entity's state and the step's exit from it; raises if there's none."""
+    def _unfinished_state(self, entity_id, current: Current | None) -> States:
+        """The entity's state, which has a step; raises if it hasn't started or is final."""
         if current is None:
             raise TransitionError(f"{self.name}:{entity_id} hasn't started")
         state = self._state(current)
-        exit_ = self._exits.get(state, {}).get(_step_name(step))
-        if exit_ is None:
-            raise TransitionError(f"{_step_name(step)} doesn't leave {state.value}")
-        return state, exit_
-
-    def _resolve_step(self, step: Callable | str) -> Callable:
-        name = step if isinstance(step, str) else _step_name(step)
-        found = self.steps.get(name)
-        if found is None or (not isinstance(step, str) and found is not step):
-            raise TransitionError(f"{name!r} is not a step of {self.name}")
-        return found
+        if state.is_final:
+            raise TransitionError(f"{self.name}:{entity_id} is in {state.value}, a final state: nothing leaves it")
+        return state
 
     def _state(self, current: Current) -> States:
         try:
@@ -452,49 +451,20 @@ class Machine:
 # ── Build-time checks ──
 
 
-def _expand(states: type[States], rows: list) -> list[Edge]:
+def _expand(states: type[States], pairs: list) -> list[Edge]:
     edges = []
-    for index, row in enumerate(rows):
-        if not (isinstance(row, tuple) and len(row) == 3):
-            raise MachineError(f"row {index} is {row!r}: a row is a (from, to, step) tuple")
-        sources, target, step = row
+    for index, pair in enumerate(pairs):
+        if not (isinstance(pair, tuple) and len(pair) == 2):
+            raise MachineError(f"edge {index} is {pair!r}: an edge is a (from, to) tuple")
+        sources, target = pair
         sources = sources if isinstance(sources, tuple) else (sources,)
         if not sources:
-            raise MachineError(f"row {index} has an empty from tuple")
+            raise MachineError(f"edge {index} has an empty from tuple")
         for state in (*sources, target):
-            _check_member(states, state, index)
-        _check_step(states, step, index)
-        edges.extend(Edge(source, target, step) for source in sources)
+            if not isinstance(state, states):
+                raise MachineError(f"edge {index}: {state!r} is not a state of {states.__name__}")
+        edges.extend(Edge(source, target) for source in sources)
     return edges
-
-
-def _check_member(states: type[States], state, index: int):
-    if not isinstance(state, states):
-        raise MachineError(f"row {index}: {state!r} is not a state of {states.__name__}")
-
-
-def _check_step(states: type[States], step, index: int):
-    if isinstance(step, Decide):
-        if step.states not in (states, States):
-            raise MachineError(
-                f"row {index}: {step.name}'s Decision types `to` as {step.states.__name__}, "
-                f"not {states.__name__}"
-            )
-        return
-    if not callable(step) or isinstance(step, type):
-        raise MachineError(f"row {index}: the step {step!r} is not a function or a Decide")
-    name = getattr(step, "__name__", None)
-    if not name or name == "<lambda>":
-        raise MachineError(f"row {index}: the step {step!r} has no name; define it with def")
-
-
-def _index_steps(edges: list[Edge]) -> dict[str, Callable]:
-    steps = {}
-    for edge in edges:
-        name = _step_name(edge.step)
-        if steps.setdefault(name, edge.step) is not edge.step:
-            raise MachineError(f"two different steps are named {name!r}")
-    return steps
 
 
 def _the_initial_state(states: type[States]) -> States:
@@ -505,51 +475,43 @@ def _the_initial_state(states: type[States]) -> States:
     return initials[0]
 
 
-def _exits_by_state(edges: list[Edge]) -> dict[States, dict[str, _Exit]]:
-    """For each state, its steps in list order, each with the targets its rows give it there."""
-    targets: dict[States, dict[str, list[States]]] = {}
-    steps: dict[str, Callable] = {}
+def _targets_by_state(edges: list[Edge]) -> dict[States, tuple[States, ...]]:
+    """For each state with an edge out, the states it leads to, in list order."""
+    targets: dict[States, list[States]] = {}
     for edge in edges:
-        name = _step_name(edge.step)
-        steps[name] = edge.step
-        row_targets = targets.setdefault(edge.from_state, {}).setdefault(name, [])
-        if edge.to_state not in row_targets:
-            row_targets.append(edge.to_state)
-    return {
-        state: {name: _Exit(steps[name], tuple(ts)) for name, ts in by_step.items()}
-        for state, by_step in targets.items()
-    }
+        leads_to = targets.setdefault(edge.from_state, [])
+        if edge.to_state not in leads_to:
+            leads_to.append(edge.to_state)
+    return {state: tuple(leads_to) for state, leads_to in targets.items()}
 
 
-def _check_finals_have_no_rows(exits: dict[States, dict[str, _Exit]]):
-    for state in exits:
-        if state.is_final:
-            raise MachineError(f"{state.name} is a FinalState but has rows leaving it")
-
-
-def _check_nothing_stuck(states: type[States], exits: dict[States, dict[str, _Exit]]):
+def _check_steps(states: type[States]):
     for state in states:
-        if not state.is_final and state not in exits:
-            raise MachineError(f"{state.name} has no rows leaving it; make it a FinalState or add one")
+        if state.is_final and state.step is not None:
+            raise MachineError(f"{state.name} is a FinalState but has a step")
+        if not state.is_final and state.step is None:
+            raise MachineError(f"{state.name} has no step; give it one with step= or make it a FinalState")
 
 
-def _check_all_reachable(states: type[States], initial: States, exits):
+def _check_finals_have_no_edges(targets: dict[States, tuple[States, ...]]):
+    for state in targets:
+        if state.is_final:
+            raise MachineError(f"{state.name} is a FinalState but has edges leaving it")
+
+
+def _check_nothing_stuck(states: type[States], targets: dict[States, tuple[States, ...]]):
+    for state in states:
+        if not state.is_final and state not in targets:
+            raise MachineError(f"{state.name} has no edges leaving it; make it a FinalState or add one")
+
+
+def _check_all_reachable(states: type[States], initial: States, targets: dict[States, tuple[States, ...]]):
     reached, queue = {initial}, deque([initial])
     while queue:
-        for exit_ in exits.get(queue.popleft(), {}).values():
-            for target in exit_.targets:
-                if target not in reached:
-                    reached.add(target)
-                    queue.append(target)
+        for target in targets.get(queue.popleft(), ()):
+            if target not in reached:
+                reached.add(target)
+                queue.append(target)
     unreachable = [s.name for s in states if s not in reached]
     if unreachable:
         raise MachineError(f"not reachable from {initial.name}: {', '.join(unreachable)}")
-
-
-# ── Helpers ──
-
-
-def _step_name(step) -> str:
-    return step.name if isinstance(step, Decide) else step.__name__
-
-

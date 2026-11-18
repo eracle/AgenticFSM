@@ -67,7 +67,6 @@ log_entry = Table(
     Column("id", _ID, primary_key=True, autoincrement=True),
     Column("machine", String(100), nullable=False),
     Column("entity", String(255), nullable=False),
-    Column("step", String(255), nullable=True),
     Column("from_state", String(255), nullable=True),
     Column("to_state", String(255), nullable=False),
     Column("decided_by", String(255), nullable=False),

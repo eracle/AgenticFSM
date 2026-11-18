@@ -14,11 +14,10 @@ from datetime import UTC, datetime
 
 @dataclass(frozen=True)
 class Move:
-    """One log row: a move that happened."""
+    """One log row: a move that happened. A start has no ``from_state``."""
 
     machine: str
     entity: str
-    step: str | None
     from_state: str | None
     to_state: str
     decided_by: str

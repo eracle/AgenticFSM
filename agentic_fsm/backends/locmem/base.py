@@ -18,7 +18,7 @@ class StateBackend(BaseStateBackend):
     # ── Writes ──
 
     def start(self, machine, entity, state):
-        move = Move(machine, entity, None, None, state, "code", utc_now())
+        move = Move(machine, entity, None, state, "code", utc_now())
         with self._lock:
             if (machine, entity) in self._current:
                 raise AlreadyStarted(f"{machine}:{entity} has already started")

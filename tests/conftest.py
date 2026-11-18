@@ -8,39 +8,56 @@ import pytest
 from agentic_fsm import FinalState, InitialState, Machine, State, States, get_backend
 
 
-class Order(States):
-    pending = InitialState("Placed, not paid yet")
-    paid = State("Payment cleared, waiting to ship")
-    shipped = State("Handed to the carrier")
-    delivered = FinalState("The carrier delivered it")
-    cancelled = FinalState("Cancelled before it shipped")
+def order_states(**steps):
+    """The order's states. A test replaces a state's step by naming the state: ``paid=my_step``.
+
+    Each call makes a class of its own, so a replaced step returns the states of the class it
+    was built into (``orders.states.paid``), not this module's ``Order``.
+    """
+
+    def await_payment(order):
+        if order.cancel_requested:
+            return Order.cancelled
+        return Order.paid if order.payment_cleared else None
+
+    def pack(order):
+        if order.cancel_requested:
+            return Order.cancelled
+        return Order.shipped if order.tracking_number else None
+
+    def await_delivery(order):
+        return Order.delivered if order.delivered else None
+
+    class Order(States):
+        pending = InitialState("Placed, not paid yet", step=steps.get("pending", await_payment))
+        paid = State("Payment cleared, waiting to ship", step=steps.get("paid", pack))
+        shipped = State("Handed to the carrier", step=steps.get("shipped", await_delivery))
+        delivered = FinalState("The carrier delivered it")
+        cancelled = FinalState("Cancelled before it shipped")
+
+    return Order
 
 
-def cancel(order):
-    return Order.cancelled if order.cancel_requested else None
+def order_edges(states):
+    # fmt: off
+    return [
+        # from                           to
+        ((states.pending, states.paid),  states.cancelled),
+        (states.pending,                 states.paid),
+        (states.paid,                    states.shipped),
+        (states.shipped,                 states.delivered),
+    ]
+    # fmt: on
 
 
-def payment_cleared(order):
-    return Order.paid if order.payment_cleared else None
+Order = order_states()
+EDGES = order_edges(Order)
 
 
-def ship(order):
-    return Order.shipped if order.tracking_number else None
-
-
-def carrier_delivered(order):
-    return Order.delivered if order.delivered else None
-
-
-# fmt: off
-TRANSITIONS = [
-    # from                         to                step
-    ((Order.pending, Order.paid),  Order.cancelled,  cancel),
-    (Order.pending,                Order.paid,       payment_cleared),
-    (Order.paid,                   Order.shipped,    ship),
-    (Order.shipped,                Order.delivered,  carrier_delivered),
-]
-# fmt: on
+def order_machine(backend, table, **steps):
+    """An order machine on ``backend`` with the given states' steps replaced."""
+    states = order_states(**steps)
+    return Machine(states, order_edges(states), load=lambda order_id: table[order_id], backend=backend)
 
 
 def new_order(**facts):
@@ -85,4 +102,4 @@ def table():
 
 @pytest.fixture
 def orders(backend, table):
-    return Machine(Order, TRANSITIONS, load=lambda order_id: table[order_id], backend=backend)
+    return Machine(Order, EDGES, load=lambda order_id: table[order_id], backend=backend)

@@ -1,6 +1,6 @@
 import pytest
 
-from agentic_fsm import FinalState, InitialState, State, States
+from agentic_fsm import FinalState, InitialState, State, States, Step
 
 from .conftest import Order
 
@@ -19,20 +19,33 @@ def test_each_state_keeps_its_description_and_kind():
     assert (Order.pending.kind, Order.paid.kind, Order.cancelled.kind) == ("initial", "state", "final")
 
 
-def test_a_state_gives_back_its_declaration():
-    class Perishable(State):
-        def __init__(self, description, *, keeps_days):
-            super().__init__(description)
-            self.keeps_days = keeps_days
+def test_a_state_keeps_its_step_and_a_function_is_wrapped_into_one():
+    def shelve(crate):
+        return Crate.on_shelf
+
+    class Restock(Step):
+        def run(self, entity, targets):
+            return None
+
+    restock = Restock()
 
     class Crate(States):
-        packed = InitialState("Packed, in the cold room")
-        on_shelf = Perishable("On the shelf", keeps_days=3)
+        packed = InitialState("Packed, in the cold room", step=shelve)
+        on_shelf = State("On the shelf", step=restock)
         sold = FinalState("Sold")
 
-    assert Crate.on_shelf.declaration.keeps_days == 3
-    assert Crate.on_shelf.kind == "state"
-    assert type(Crate.packed.declaration) is InitialState
+    assert isinstance(Crate.packed.step, Step)
+    assert Crate.packed.step.run(object(), ()) is Crate.on_shelf
+    assert Crate.packed.step.label == "shelve"
+    assert Crate.on_shelf.step is restock
+    assert Crate.on_shelf.step.label == "Restock"
+    assert Crate.sold.step is None
+
+
+@pytest.mark.parametrize("step", ["shelve", 3, Step])
+def test_a_step_must_be_a_function_or_a_step(step):
+    with pytest.raises(TypeError, match="step= must be a function of the entity or a Step"):
+        State("On the shelf", step=step)
 
 
 def test_value_overrides_the_stored_value():

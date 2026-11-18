@@ -16,7 +16,7 @@ from agentic_fsm.backends.sqlalchemy.base import StateBackend
 from agentic_fsm.backends.sqlalchemy.tables import current_state, log_entry, metadata
 from agentic_fsm.conf import settings
 
-from .conftest import TRANSITIONS, Order, cancel, new_order, sqlalchemy_backend
+from .conftest import EDGES, Order, new_order, order_machine, sqlalchemy_backend
 
 # The one instant both backends log their moves at, so the rows they store can be compared.
 MOVED_AT = datetime(2026, 1, 2, 3, 4, 5, 678901, tzinfo=UTC)
@@ -33,17 +33,17 @@ receipts = Table(
 
 
 def machine_writing_receipts(backend, table, fail=False):
-    """An order machine whose payment step writes a receipt through the backend's connection."""
+    """An order machine whose pending step writes a receipt through the backend's connection."""
 
-    def payment_cleared(order):
+    def pending(order):
         backend.connection().execute(insert(receipts).values(order_id=order.id))
         if fail:
             raise RuntimeError("the payment provider is down")
-        return Order.paid
+        return orders.states.paid
 
-    rows = [TRANSITIONS[0], (Order.pending, Order.paid, payment_cleared), *TRANSITIONS[2:]]
     receipts_metadata.create_all(backend.engine)
-    return Machine(Order, rows, load=lambda order_id: table[order_id], backend=backend), payment_cleared
+    orders = order_machine(backend, table, pending=pending)
+    return orders
 
 
 def receipt_ids(backend):
@@ -56,26 +56,26 @@ def receipt_ids(backend):
 
 def test_a_steps_writes_commit_with_the_move(table):
     backend = sqlalchemy_backend()
-    orders, payment_cleared = machine_writing_receipts(backend, table)
+    orders = machine_writing_receipts(backend, table)
     table["1"] = new_order(id="1")
     orders.start(1)
 
-    orders.fire(1, payment_cleared)
+    orders.fire(1)
 
-    assert orders.state_of(1) is Order.paid
+    assert orders.state_of(1) is orders.states.paid
     assert receipt_ids(backend) == ["1"]
 
 
 def test_a_step_that_raises_rolls_back_its_writes_and_the_move(table):
     backend = sqlalchemy_backend()
-    orders, payment_cleared = machine_writing_receipts(backend, table, fail=True)
+    orders = machine_writing_receipts(backend, table, fail=True)
     table["1"] = new_order(id="1")
     orders.start(1)
 
     with pytest.raises(RuntimeError):
-        orders.fire(1, payment_cleared)
+        orders.fire(1)
 
-    assert orders.state_of(1) is Order.pending
+    assert orders.state_of(1) is orders.states.pending
     assert receipt_ids(backend) == []
 
 
@@ -88,20 +88,21 @@ def test_a_read_inside_a_lock_sees_the_locks_own_writes(table):
     backend = sqlalchemy_backend()
     seen = []
 
-    def payment_cleared(order):
-        orders.fire(2, cancel)
+    def pending(order):
+        if order.cancel_requested:
+            return orders.states.cancelled
+        orders.fire(2)
         seen.append(orders.state_of(2))
-        return Order.paid
+        return orders.states.paid
 
-    rows = [TRANSITIONS[0], (Order.pending, Order.paid, payment_cleared), *TRANSITIONS[2:]]
-    orders = Machine(Order, rows, load=lambda order_id: table[order_id], backend=backend)
+    orders = order_machine(backend, table, pending=pending)
     table["1"], table["2"] = new_order(), new_order(cancel_requested=True)
     orders.start(1)
     orders.start(2)
 
-    orders.fire(1, payment_cleared)
+    orders.fire(1)
 
-    assert seen == [Order.cancelled]
+    assert seen == [orders.states.cancelled]
 
 
 # ── The tables ──
@@ -123,7 +124,7 @@ def test_the_tables_are_the_django_backends(table, model):
 
 
 STORED_LOG = (
-    "SELECT machine, entity, step, from_state, to_state, decided_by, decision, CAST(at AS TEXT) "
+    "SELECT machine, entity, from_state, to_state, decided_by, decision, CAST(at AS TEXT) "
     "FROM agentic_fsm_logentry ORDER BY id"
 )
 STORED_STATE = (
@@ -136,7 +137,7 @@ def write_an_orders_moves(backend, at=MOVED_AT):
     backend.start("order", "1", "pending")
     for to_state, decision in (("paid", {"to": "paid", "note": "cleared"}), ("shipped", None)):
         with backend.lock("order", "1") as current:
-            backend.move(Move("order", "1", "step", current.state, to_state, "code", at, decision))
+            backend.move(Move("order", "1", current.state, to_state, "code", at, decision))
 
 
 @pytest.mark.django_db
@@ -171,7 +172,7 @@ def test_a_move_with_no_decision_stores_null():
 
 def test_create_tables_leaves_existing_tables_and_rows(table):
     backend = sqlalchemy_backend()
-    orders = Machine(Order, TRANSITIONS, load=table.get, backend=backend)
+    orders = Machine(Order, EDGES, load=table.get, backend=backend)
     orders.start(1)
 
     backend.create_tables()
@@ -188,7 +189,7 @@ def test_the_backend_connects_to_the_sqlalchemy_url_setting(tmp_path, monkeypatc
 
     backend = get_backend("agentic_fsm.backends.sqlalchemy")
     backend.create_tables()
-    Machine(Order, TRANSITIONS, load=dict().get, backend=backend).start(1)
+    Machine(Order, EDGES, load=dict().get, backend=backend).start(1)
 
     assert str(backend.engine.url) == url
     assert get_backend("agentic_fsm.backends.sqlalchemy").engine is backend.engine
@@ -213,7 +214,7 @@ def test_an_engine_function_is_called_once_on_first_use(tmp_path):
         return create_engine(f"sqlite:///{tmp_path / 'state.sqlite3'}")
 
     backend = StateBackend(make_engine)
-    orders = Machine(Order, TRANSITIONS, load=dict().get, backend=backend)
+    orders = Machine(Order, EDGES, load=dict().get, backend=backend)
     assert calls == []
 
     backend.create_tables()
@@ -242,23 +243,22 @@ def postgres_backend():
 
 
 def test_a_second_fire_waits_for_the_first_on_postgres(postgres_backend, table):
-    """While payment_cleared runs in one thread, another tries to cancel the same order."""
+    """While pending's step runs in one thread, another fires the same order."""
     step_running, may_finish = Event(), Event()
 
-    def payment_cleared(order):
+    def pending(order):
         step_running.set()
         may_finish.wait(timeout=5)
-        return Order.paid
+        return orders.states.paid
 
-    rows = [TRANSITIONS[0], (Order.pending, Order.paid, payment_cleared), *TRANSITIONS[2:]]
-    orders = Machine(Order, rows, load=lambda order_id: table[order_id], backend=postgres_backend)
+    orders = order_machine(postgres_backend, table, pending=pending)
     table["1"] = new_order(cancel_requested=True)
     orders.start(1)
 
-    first = Thread(target=orders.fire, args=(1, payment_cleared))
+    first = Thread(target=orders.fire, args=(1,))
     first.start()
     step_running.wait(timeout=5)
-    second = Thread(target=lambda: orders.fire(1, cancel))
+    second = Thread(target=orders.fire, args=(1,))
     second.start()
     second.join(timeout=0.5)
     assert second.is_alive(), "the second fire should wait on the first's row lock"

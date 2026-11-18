@@ -30,36 +30,44 @@ by whoever knows something new. A machine is three plain Python things.
 - **States** (`states.py`): declared like Django model fields, `pending = InitialState("...")`.
   `_StatesMeta` replaces each declaration with its stored value before the enum is built, so the
   class is a real `str` enum (`Order.paid == "paid"`, usable as a Pydantic type) whose members
-  keep their description, kind and tags. The description is required; it's the state's
-  definition. `declaration` gives back the `State` object a member was declared with, so a
-  caller's subclass of `State` can carry more. `tags=` makes a state a queue: `progress_all(tag)` and `due(tag)` try only the
+  keep their description, kind, tags and step. The description is required; it's the state's
+  definition. `step=` is the one step that decides where an entity goes from the state
+  (`States.step`); a final state has none. `tags=` makes a state a queue: `progress_all(tag)` and `due(tag)` try only the
   entities in a state carrying the tag, so one worker does one kind of work (`Machine._tagged`;
   a tag no state carries raises `MachineError`). `agfsm due` and `progress_all` take `--tag`.
   `progress_all(limit=)` (`--limit`) stops after that many moves, oldest entity first; an
   entity that doesn't move or raises doesn't count.
-- **Steps**: a named function of the entity that returns the next state (or a `Decision`), or
-  `None` for "not now"; or a `Decide`, which puts the question to a model (see *Decide*).
-  `@check` (`machine.py`) marks a function step that only reads, so `due` may run it; it sets
-  an attribute on the function and refuses a `Decide`.
-- **Transitions**: one list of `(from, to, step)` rows; `from` may be a tuple. A step's allowed
-  targets out of a state are the rows it sits on there.
+- **Steps** (`steps.py`): a state has exactly one, and it has no name: the state identifies
+  it. `Step` is the abstract base, with `run(entity, targets)` and three attributes the machine
+  reads: `reads_only` (`due` may run it), `decided_by` (who its moves are logged under,
+  default `code`) and `effect` (run with the result before the move is written). A plain
+  function of the entity is wrapped into a `FunctionStep` by `as_step` where the state is
+  declared (`State.__init__`), so the machine only ever calls `step.run`. `run` returns the
+  next state (or a `Decision`), `None` for "not now", or **another `Step` to hand over to**,
+  which the machine then runs with the same targets (`Machine._try`); a `Decide` is one (see
+  *Decide*). `@check` marks a function that only reads: it sets an attribute on the function,
+  which `FunctionStep` reads into `reads_only`, and refuses a `Step` object.
+- **Edges**: one list of `(from, to)` pairs; `from` may be a tuple. A state's step may return
+  only the states its state has an edge to (`Machine._targets`).
 
-`Machine(states, rows, load=, backend=, name=)` (`machine.py`) checks the declaration and raises
-`MachineError` naming the state or row. Then:
+`Machine(states, edges, load=, backend=, name=)` (`machine.py`) checks the declaration and raises
+`MachineError` naming the state or edge: one initial state, a step on every state but a final
+one and none on those, no edges out of a final state, no other state without one, every state
+reachable. Then:
 
 | Call | Does |
 |---|---|
 | `start(id)` | puts an entity in the initial state; `AlreadyStarted` if it has one |
 | `start_all(ids)` | starts each id with no state yet (one `all_current` read, then a `start` each; a rival's `AlreadyStarted` is skipped), for entities another program makes |
-| `fire(id, step)` | runs one step (the function, the `Decide` or its name); returns the logged `Move`, or `None` for "not now" |
-| `fire(id, step, entity=)` | the same, on the entity already in hand instead of `load(id)` (`brief` takes it too) |
-| `fire(id, step, answer=)` | decides a `Decide` in the model's place; no model call, the prompt doesn't run, its `effect` does |
-| `brief(id, step)` | the `Brief` a `Decide` would give the model: instructions, prompt, choices, schema, tools |
-| `progress(id)` | moves one entity until it rests: each round tries the steps out of its state in list order on the entity loaded afresh, and commits its move; it stops when no step moves it, or after a move back to a state this call already left |
-| `progress_all()` | per unfinished entity, tries the steps out of its state in list order and stops at the first that doesn't return `None`: at most one move per entity per call, each entity locked and committed on its own. An entity that raises is recorded and the rest tried; then `ProgressError(moves, failures)` |
-| `due()` | the unfinished entities a step could move now, writing nothing: under each entity's lock, steps in list order, a `@check` step runs, any other step makes the entity due untried |
+| `fire(id)` | runs the step of the entity's state, and each step it hands over to; returns the logged `Move`, or `None` for "not now" |
+| `fire(id, entity=)` | the same, on the entity already in hand instead of `load(id)` (`brief` takes it too) |
+| `fire(id, answer=)` | decides in a `Decide`'s place; no model call, the prompt doesn't run, its `effect` does |
+| `brief(id)` | the `Brief` a `Decide` would give the model: state, instructions, prompt, choices, schema, tools |
+| `progress(id)` | moves one entity until it rests: each round runs its state's step on the entity loaded afresh, and commits its move; it stops when the step doesn't move it, or after a move back to a state this call already left |
+| `progress_all()` | per unfinished entity, runs its state's step: at most one move per entity per call, each entity locked and committed on its own. An entity that raises is recorded and the rest tried; then `ProgressError(moves, failures)` |
+| `due()` | the unfinished entities their state's step could move now, writing nothing: under each entity's lock, a step that only reads runs (and so does one it hands over to, if that only reads too); any other step makes the entity due untried (`_would_move`) |
 | `state_of(id)`, `in_state(state)`, `history(id)` | reads |
-| `graph()` | states and rows as data |
+| `graph()` | states (each with its step's `label`) and edges as data |
 | `on_move(listener)` | adds a listener, called with the `Move` after every move and start; returns it, so it decorates |
 
 **A listener is told once the move is committed.** `start` and `_apply` hand the move to
@@ -72,9 +80,17 @@ the Django backend with `transaction=True`: in pytest-django's usual test transa
 commits.
 
 **Every row in the log is a move that happened.** `fire` raises `TransitionError` and writes
-nothing when the move can't be made: an unknown step, an entity not started, a step that doesn't
-leave the state, a result outside the step's rows or not a state at all (a bug in the step), an
-answer that doesn't validate. Entity ids are stored as text, so `load` receives a string.
+nothing when the move can't be made: an entity not started or in a final state, a result outside
+the state's edges or not a state at all (a bug in the step), an answer that doesn't validate or
+that the state's code leaves no room for. A log row has no step name: its `from_state` says
+which step ran (a start has none) and `decided_by` who decided. Entity ids are stored as text,
+so `load` receives a string.
+
+**An answer is taken at the end.** `fire(answer=)` and `brief` find the `Decide` with
+`Machine._decide_for`: the state's step if it is one, else the step is run and must hand over
+to one. It is run only if it only reads (`@check`), since it runs again on every brief and
+answer; one that doesn't raises `TransitionError` untried, and so does one that returns a state
+("moves it itself") or `None` ("not now"). An answer never overrides what the code settles.
 
 **The entity is locked from read to write.** `fire` (and each round of `progress` and
 `progress_all`) runs inside the backend's `lock(machine, entity)`: it reads the current state,
@@ -83,25 +99,30 @@ left. A step that raises undoes the move and, on the Django backend, the step's 
 
 ## Decide
 
-`decide.py` holds `Decision` (a Pydantic model whose one field is `to`), `Decide(name=, prompt=,
-agent= | schema=)` and `Brief`. The `Agent` is Pydantic AI's and is the whole model-side
-definition; without one, `Decide` builds an agent for the `DECIDE_MODEL` setting with the schema as
-its output type, with the model check deferred so no key is needed until it runs.
+`decide.py` holds `Decision` (a Pydantic model whose one field is `to`), `Decide(prompt=,
+agent= | schema=, effect=)`, a `Step`, and `Brief`. The `Agent` is Pydantic AI's and
+is the whole model-side definition; without one, `Decide` builds an agent for the `DECIDE_MODEL`
+setting with the schema as its output type, with the model check deferred so no key is needed
+until it runs. A `Decide` is a state's step (`step=Decide(...)`) or what a state's function
+returns to hand over. A schema leaves `to` typed as `States`: a `Decide` given in a class body
+can't name the class being built, and `to` is narrowed when it runs.
 
 - **Run**: `Decide.run(entity, targets)` calls the prompt function (falsy: "not now", no call),
   then `ask(prompt, entity, <narrowed schema>)`, which is `agent.run_sync(prompt, deps=entity,
   output_type=...)`; a subclass that calls its model another way overrides `ask` and
   `decided_by`. The narrowed schema
-  is a copy whose `to` is a `Literal` of the step's targets out of the entity's state, with each
-  state's description in the field's description. The machine checks the result against the rows
-  afterwards either way. A model that keeps answering outside them raises Pydantic AI's
-  `UnexpectedModelBehavior`, and nothing is logged.
+  is a copy whose `to` is a `Literal` of the state's targets, with each state's description in
+  the field's description. The machine checks the result against the state's edges afterwards
+  either way. A model that keeps answering outside them raises Pydantic AI's
+  `UnexpectedModelBehavior`, and nothing is logged. A `Decide` a function hands over to is
+  offered every target of the state, those only the function's facts lead to included: the
+  states' descriptions are what tell the model which is which.
 - **Answer**: `Decide.parse(answer, targets)` validates a dict, a JSON object or a bare state value
   against the same narrowed schema. The machine raises `TransitionError` on an invalid one.
 - **Effect**: `Decide(effect=)` is a function of the entity and the decision. `Machine._apply`
-  runs it after the target is checked against the rows and before `backend.move`, for a run
-  and for an answer alike (`_answer` loads the entity only when the step has one). One that
-  raises leaves nothing written.
+  runs the deciding step's `effect` after the target is checked against the edges and before
+  `backend.move`, for a run and for an answer alike (`_answer` loads the entity only when the
+  step has one). One that raises leaves nothing written.
 - **Logged**: `decided_by` is `llm:<provider>:<model>` for a run, `agent` for an answer and
   `code` for a function, and `Move.decision` holds the whole `Decision`.
 - `Brief.instructions` and `Brief.tools` read the agent's plain-text instructions (a private
@@ -181,8 +202,10 @@ Every backend keeps the same two things and the same rule: `move`, called inside
 rewrites the entity's current-state row and appends its log row, and both commit when the lock
 is released.
 
-`0002_only_real_moves` deleted the refused log rows and dropped `applied`, `reason` and
-`version`. An app whose migration writes those columns through the historical models declares `run_before = [("agentic_fsm", "0002_only_real_moves")]`.
+`0003_no_step_name` dropped the log's `step` column. The SQLAlchemy backend's `create_tables()`
+only makes what's missing, so a database it made earlier keeps the column, nullable and unused,
+until whoever owns it drops it. `0002_only_real_moves` deleted the refused log rows and dropped
+`applied`, `reason` and `version`. An app whose migration writes those columns through the historical models declares `run_before = [("agentic_fsm", "0002_only_real_moves")]`.
 
 ## Tests
 

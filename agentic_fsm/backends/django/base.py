@@ -13,14 +13,14 @@ from django.db import IntegrityError, transaction
 from ..base.base import AlreadyStarted, BaseStateBackend, Current, Move, utc_now
 from .models import CurrentState, LogEntry
 
-LOG_FIELDS = ("machine", "entity", "step", "from_state", "to_state", "decided_by", "at", "decision")
+LOG_FIELDS = ("machine", "entity", "from_state", "to_state", "decided_by", "at", "decision")
 
 
 class StateBackend(BaseStateBackend):
     # ── Writes ──
 
     def start(self, machine, entity, state):
-        move = Move(machine, entity, None, None, state, "code", utc_now())
+        move = Move(machine, entity, None, state, "code", utc_now())
         try:
             with transaction.atomic():
                 CurrentState.objects.create(machine=machine, entity=entity, state=state, updated_at=move.at)

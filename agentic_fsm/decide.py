@@ -1,19 +1,17 @@
 """Steps a model or an agent decides: ``Decision`` and ``Decide``.
 
     class MessageRead(Decision):
-        to: Order
         reason: str
 
     read_message = Decide(
-        name="read_message",
         prompt=lambda order: order.message and f"Where does this message put the order?\\n{order.message}",
         schema=MessageRead,
     )
 
-A ``Decide`` sits on transition rows like a function step. When it runs, the model is offered only
-the targets of its rows out of the entity's state, each with its description. A session can stand
-in for the model: ``machine.brief(...)`` gives it what the model would get, and
-``machine.fire(..., answer=...)`` applies what it decided.
+A ``Decide`` is a state's step, or what a state's function hands over to. When it runs, the
+model is offered only the states the entity's state has an edge to, each with its description.
+A session can stand in for the model: ``machine.brief(...)`` gives it what the model would get,
+and ``machine.fire(..., answer=...)`` applies what it decided.
 """
 
 import json
@@ -26,12 +24,13 @@ from pydantic_ai import Agent
 
 from .conf import settings
 from .states import States
+from .steps import Step
 
 
 class Decision(BaseModel):
     """What a model, an agent or code decided: where the entity goes, and whatever a subclass adds.
 
-    A subclass types ``to`` as its machine's own ``States`` class.
+    When a ``Decide`` runs, ``to`` is narrowed to the states the entity may go to.
     """
 
     to: States
@@ -41,7 +40,7 @@ class Decision(BaseModel):
 class Brief:
     """Everything a session needs to decide a ``Decide`` step in the model's place."""
 
-    step: str
+    state: str  # the state the entity is in, whose step this is
     instructions: list[str]
     prompt: str | None  # None: the prompt function said "not now"
     choices: list[tuple[str, str]]  # (state value, description)
@@ -49,7 +48,7 @@ class Brief:
     tools: list[tuple[str, str]]  # (name, description) of the agent's own tools
 
 
-class Decide:
+class Decide(Step):
     """A step decided by a Pydantic AI ``Agent``.
 
     ``prompt`` is a function of the entity; a falsy return means "not now" and no call is made.
@@ -66,25 +65,21 @@ class Decide:
     def __init__(
         self,
         *,
-        name: str,
         prompt: Callable[[object], str | None],
         agent: Agent | None = None,
         schema: type[Decision] | None = None,
         effect: Callable[[object, Decision], None] | None = None,
     ):
-        if not isinstance(name, str) or not name:
-            raise TypeError(f"a Decide needs a name, got {name!r}")
         if not callable(prompt):
-            raise TypeError(f"{name}: prompt= must be a function of the entity")
+            raise TypeError("a Decide's prompt= must be a function of the entity")
         if effect is not None and not callable(effect):
-            raise TypeError(f"{name}: effect= must be a function of the entity and the decision")
+            raise TypeError("a Decide's effect= must be a function of the entity and the decision")
         if agent is not None and schema is not None:
-            raise TypeError(f"{name}: pass agent= or schema=, not both; an agent's output type is its schema")
+            raise TypeError("a Decide takes agent= or schema=, not both; an agent's output type is its schema")
         if agent is None:
             agent = Agent(settings.DECIDE_MODEL, output_type=schema or Decision, defer_model_check=True)
         if not _is_decision_type(agent.output_type):
-            raise TypeError(f"{name}: the output type {agent.output_type!r} must subclass Decision")
-        self.name = name
+            raise TypeError(f"a Decide's output type must subclass Decision, got {agent.output_type!r}")
         self.prompt = prompt
         self.agent = agent
         self.effect = effect
@@ -92,12 +87,7 @@ class Decide:
         self._narrowed: dict[tuple[States, ...], type[Decision]] = {}
 
     def __repr__(self) -> str:
-        return f"Decide({self.name!r})"
-
-    @property
-    def states(self) -> type[States]:
-        """The ``States`` class the schema's ``to`` is typed as."""
-        return self.schema.model_fields["to"].annotation
+        return f"Decide({self.schema.__name__})"
 
     @property
     def decided_by(self) -> str:
@@ -109,10 +99,10 @@ class Decide:
 
     # ── Deciding ──
 
-    def run(self, entity, targets: tuple[States, ...] | None = None) -> Decision | None:
+    def run(self, entity, targets: tuple[States, ...]) -> Decision | None:
         """Ask the model about ``entity``: its decision, or ``None`` if the prompt said "not now".
 
-        With ``targets``, the model is offered only those states.
+        The model is offered only ``targets``.
         """
         prompt = self.prompt(entity)
         if not prompt:
@@ -127,17 +117,17 @@ class Decide:
         """
         return self.agent.run_sync(prompt, deps=entity, output_type=schema).output
 
-    def parse(self, answer, targets: tuple[States, ...] | None = None) -> Decision:
+    def parse(self, answer, targets: tuple[States, ...]) -> Decision:
         """Validate an answer given in the model's place. Raises ``ValueError`` saying what's wrong."""
         try:
             return self._schema_for(targets).model_validate(answer_fields(answer))
         except ValidationError as error:
             raise ValueError(_summary(error)) from None
 
-    def brief(self, entity, targets: tuple[States, ...]) -> Brief:
-        """What the model would be given for ``entity``, for a session deciding in its place."""
+    def brief(self, entity, state: States, targets: tuple[States, ...]) -> Brief:
+        """What the model would be given for ``entity`` in ``state``, for a session deciding in its place."""
         return Brief(
-            step=self.name,
+            state=state.value,
             instructions=_static_instructions(self.agent),
             prompt=self.prompt(entity) or None,
             choices=[(target.value, target.description) for target in targets],
@@ -145,10 +135,8 @@ class Decide:
             tools=_function_tools(self.agent),
         )
 
-    def _schema_for(self, targets: tuple[States, ...] | None) -> type[Decision]:
+    def _schema_for(self, targets: tuple[States, ...]) -> type[Decision]:
         """The schema with ``to`` narrowed to ``targets``, each listed with its description."""
-        if not targets:
-            return self.schema
         if targets not in self._narrowed:
             choices = "\n".join(f"- {target.value}: {target.description}" for target in targets)
             self._narrowed[targets] = create_model(

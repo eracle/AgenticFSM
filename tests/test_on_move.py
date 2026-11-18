@@ -8,9 +8,9 @@ import logging
 
 import pytest
 
-from agentic_fsm import Machine, TransitionError
+from agentic_fsm import TransitionError
 
-from .conftest import TRANSITIONS, Order, backend_named, new_order, payment_cleared, ship
+from .conftest import Order, backend_named, new_order, order_machine
 
 UNDOES = ["sqlalchemy", pytest.param("django", marks=pytest.mark.django_db(transaction=True))]
 
@@ -70,16 +70,19 @@ def test_a_step_that_says_not_now_tells_no_one(orders, table, told):
     table["1"] = new_order()
     orders.start(1)
 
-    assert orders.fire(1, payment_cleared) is None
+    assert orders.fire(1) is None
     assert len(told) == 1
 
 
-def test_a_move_that_cant_be_made_tells_no_one(orders, table, told):
-    table["1"] = new_order(tracking_number="1Z")
+def test_a_move_that_cant_be_made_tells_no_one(backend, table):
+    orders = order_machine(backend, table, pending=lambda order: orders.states.shipped)  # no edge there
+    told = []
+    orders.on_move(told.append)
+    table["1"] = new_order()
     orders.start(1)
 
     with pytest.raises(TransitionError):
-        orders.fire(1, ship)
+        orders.fire(1)
     assert len(told) == 1
 
 
@@ -87,7 +90,7 @@ def test_a_machine_with_no_listener_moves_as_before(orders, table):
     table["1"] = new_order(payment_cleared=True)
     orders.start(1)
 
-    assert orders.fire(1, payment_cleared).to_state == "paid"
+    assert orders.fire(1).to_state == "paid"
 
 
 # ── When it is told ──
@@ -101,29 +104,27 @@ def test_a_listener_is_told_once_the_move_is_committed(orders, table):
     def ship_what_was_paid(move):
         seen.append(orders.state_of(move.entity))
         if move.to_state == Order.paid:
-            orders.fire(move.entity, ship)
+            orders.fire(move.entity)
 
     orders.start(1)
-    orders.fire(1, payment_cleared)
+    orders.fire(1)
 
     assert seen == [Order.pending, Order.paid, Order.shipped]
     assert orders.state_of(1) is Order.shipped
 
 
 def two_order_machine(backend, table, after_the_second=lambda: None):
-    """A machine whose ``payment_cleared`` on order 1 also pays order 2, inside its own lock."""
+    """A machine whose pending step on order 1 also pays order 2, inside its own lock."""
     told, told_inside = [], []
 
-    def payment_cleared(order):  # noqa: F811 — the row's step, under the name the rows use
+    def pending(order):
         if order.pays_other:
-            machine.fire(2, payment_cleared)
+            machine.fire(2)
             told_inside.extend(told)
             after_the_second()
-        return Order.paid
+        return machine.states.paid
 
-    rows = [(source, target, payment_cleared if step.__name__ == "payment_cleared" else step)
-            for source, target, step in TRANSITIONS]
-    machine = Machine(Order, rows, load=lambda order_id: table[order_id], backend=backend)
+    machine = order_machine(backend, table, pending=pending)
     table["1"] = new_order(pays_other=True)
     table["2"] = new_order(pays_other=False)
     machine.start_all([1, 2])
@@ -134,7 +135,7 @@ def two_order_machine(backend, table, after_the_second=lambda: None):
 def test_a_move_made_inside_another_lock_is_told_when_the_outer_one_ends(backend, table):
     machine, told, told_inside = two_order_machine(backend, table)
 
-    machine.fire(1, "payment_cleared")
+    machine.fire(1)
 
     assert told_inside == []
     assert [(move.entity, move.to_state) for move in told] == [("2", "paid"), ("1", "paid")]
@@ -148,10 +149,10 @@ def test_a_move_that_is_undone_tells_no_one(backend, table):
     machine, told, _ = two_order_machine(backend, table, after_the_second=fail)
 
     with pytest.raises(RuntimeError):
-        machine.fire(1, "payment_cleared")
+        machine.fire(1)
 
     assert told == []
-    assert machine.state_of(2) is Order.pending
+    assert machine.state_of(2) is machine.states.pending
 
 
 # ── A listener that raises ──
@@ -169,7 +170,7 @@ def test_a_listener_that_raises_is_logged_and_the_others_are_told(orders, table,
     orders.on_move(seen.append)
 
     with caplog.at_level(logging.ERROR, logger="agentic_fsm.machine"):
-        move = orders.fire(1, payment_cleared)
+        move = orders.fire(1)
 
     assert move.to_state == "paid"
     assert orders.state_of(1) is Order.paid
