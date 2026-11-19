@@ -1,4 +1,4 @@
-"""``Decide`` steps: a model decides, or a session answers in its place. No test calls a real model."""
+"""``Decide`` handlers: a model decides, or a session answers in its place. No test calls a real model."""
 
 from types import SimpleNamespace
 
@@ -44,7 +44,7 @@ def reader(model, **agent_options) -> Decide:
     return Decide(prompt=message_prompt, agent=agent)
 
 
-def machine_with(backend, table, read_message, *, confirmed_step=None) -> Machine:
+def machine_with(backend, table, read_message, *, confirmed_handler=None) -> Machine:
     """An order machine: a placed order is the model's, a confirmed one is shipped by code on a
     tracking number, held by code, and otherwise handed to the model."""
 
@@ -55,8 +55,8 @@ def machine_with(backend, table, read_message, *, confirmed_step=None) -> Machin
         return None if order.on_hold else read_message
 
     class Order(States):
-        placed = InitialState("Placed, waiting for the customer to confirm it", step=read_message)
-        confirmed = State("The customer confirmed it, waiting to ship", step=confirmed_step or ship_or_read)
+        placed = InitialState("Placed, waiting for the customer to confirm it", handler=read_message)
+        confirmed = State("The customer confirmed it, waiting to ship", handler=confirmed_handler or ship_or_read)
         shipped = FinalState("Handed to the carrier")
         cancelled = FinalState("The customer called it off")
 
@@ -164,7 +164,7 @@ def test_the_entity_reaches_the_agents_tools_as_deps(backend, table):
     assert seen == [table["1"]]
 
 
-def test_progress_all_runs_a_decide_like_any_step(backend, table):
+def test_progress_all_runs_a_decide_like_any_handler(backend, table):
     orders = machine_with(backend, table, reader(model_saying(to="cancelled", reason="Changed their mind")))
     table["1"] = new_order(message="Cancel it")
     table["2"] = new_order()
@@ -326,9 +326,9 @@ def test_an_answer_is_refused_when_the_function_moves_the_entity_on_a_fact(unrea
     unreachable.fire(1, answer={"to": "confirmed", "reason": "They said yes"})
     table["1"].tracking_number = "TRK1"
 
-    with pytest.raises(TransitionError, match="confirmed's step moves order:1 to shipped itself"):
+    with pytest.raises(TransitionError, match="confirmed's handler moves order:1 to shipped itself"):
         unreachable.fire(1, answer={"to": "cancelled", "reason": "-"})
-    with pytest.raises(TransitionError, match="confirmed's step moves order:1 to shipped itself"):
+    with pytest.raises(TransitionError, match="confirmed's handler moves order:1 to shipped itself"):
         unreachable.brief(1)
 
     assert unreachable.state_of(1) is unreachable.states.confirmed
@@ -339,9 +339,9 @@ def test_an_answer_is_refused_when_the_function_says_not_now(unreachable, table)
     unreachable.fire(1, answer={"to": "confirmed", "reason": "They said yes"})
     table["1"].on_hold = True
 
-    with pytest.raises(TransitionError, match='confirmed\'s step says "not now" for order:1'):
+    with pytest.raises(TransitionError, match='confirmed\'s handler says "not now" for order:1'):
         unreachable.fire(1, answer={"to": "cancelled", "reason": "-"})
-    with pytest.raises(TransitionError, match='confirmed\'s step says "not now" for order:1'):
+    with pytest.raises(TransitionError, match='confirmed\'s handler says "not now" for order:1'):
         unreachable.brief(1)
 
     assert unreachable.state_of(1) is unreachable.states.confirmed
@@ -352,12 +352,12 @@ def test_a_function_that_does_not_only_read_is_not_run_for_an_answer_or_a_brief(
         order.charged = True
         return orders.states.shipped
 
-    orders = machine_with(backend, table, Decide(prompt=message_prompt), confirmed_step=charge_and_ship)
+    orders = machine_with(backend, table, Decide(prompt=message_prompt), confirmed_handler=charge_and_ship)
     confirmed_order(orders, table)
 
-    with pytest.raises(TransitionError, match="confirmed's step is code that doesn't only read"):
+    with pytest.raises(TransitionError, match="confirmed's handler is code that doesn't only read"):
         orders.fire(1, answer="shipped")
-    with pytest.raises(TransitionError, match="confirmed's step is code that doesn't only read"):
+    with pytest.raises(TransitionError, match="confirmed's handler is code that doesn't only read"):
         orders.brief(1)
 
     assert not hasattr(table["1"], "charged")

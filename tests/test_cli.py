@@ -83,7 +83,7 @@ def test_a_machine_that_cannot_be_loaded_is_an_error(capsys, path, said):
 # ── show ──
 
 
-def test_show_prints_the_states_with_their_steps_and_descriptions_then_the_edges(capsys, cli_orders):
+def test_show_prints_the_states_with_their_handlers_and_descriptions_then_the_edges(capsys, cli_orders):
     _, out, _ = run(capsys, *ORDERS, "show")
     states, edges = out.split("\n\n")[1:]
     assert "pending    initial  await_payment   Placed, not paid yet" in states
@@ -102,7 +102,7 @@ def test_show_json_is_the_graph(capsys, cli_orders):
         "kind": "initial",
         "description": "Placed, not paid yet",
         "tags": [],
-        "step": "await_payment",
+        "handler": "await_payment",
     }
     assert ["pending", "paid"] in data["edges"]
 
@@ -172,10 +172,10 @@ def test_list_refuses_a_value_that_is_not_a_state(capsys, cli_orders):
     assert "pending, paid" in err
 
 
-# ── fire, progress and progress_all with code steps ──
+# ── fire, progress and progress_all with code handlers ──
 
 
-def test_fire_runs_the_step_of_the_entitys_state(capsys, cli_orders, table):
+def test_fire_runs_the_handler_of_the_entitys_state(capsys, cli_orders, table):
     table["42"] = new_order(payment_cleared=True)
     cli_orders.start(42)
     code, out, _ = run(capsys, *ORDERS, "fire", "order:42")
@@ -200,7 +200,7 @@ def test_fire_of_a_finished_entity_is_an_error(capsys, cli_orders, table):
     assert "a final state" in err
 
 
-def test_fire_takes_no_step_name(capsys, cli_orders, table):
+def test_fire_takes_no_handler_name(capsys, cli_orders, table):
     table["42"] = new_order(payment_cleared=True)
     cli_orders.start(42)
     with pytest.raises(SystemExit) as exit_:
@@ -238,7 +238,7 @@ def test_progress_moves_one_entity_until_it_rests(capsys, cli_orders, table):
     assert run(capsys, *ORDERS, "progress", "order:42")[1].strip() == "nothing moved"
 
 
-def test_a_step_outside_its_states_edges_is_an_error_and_writes_nothing(capsys, backend, table, monkeypatch):
+def test_a_handler_outside_its_states_edges_is_an_error_and_writes_nothing(capsys, backend, table, monkeypatch):
     machine = order_machine(backend, table, paid=lambda order: machine.states.delivered)  # paid has no edge there
     monkeypatch.setattr(machines, "orders", machine)
     table["1"] = new_order(payment_cleared=True)
@@ -250,7 +250,7 @@ def test_a_step_outside_its_states_edges_is_an_error_and_writes_nothing(capsys, 
     assert machine.state_of(1).value == "paid"
 
 
-def test_due_lists_what_a_step_could_move_and_moves_nothing(capsys, backend, table, monkeypatch):
+def test_due_lists_what_a_handler_could_move_and_moves_nothing(capsys, backend, table, monkeypatch):
     from .test_machine_moves import checked_orders
 
     machine = checked_orders(backend, table)
@@ -376,12 +376,12 @@ def test_an_answer_outside_the_edges_goes_back_to_the_session(capsys, cli_messag
     assert len(cli_messages.history(7)) == 1
 
 
-def test_agent_on_a_state_whose_step_is_code_is_an_error(capsys, cli_orders, table):
+def test_agent_on_a_state_whose_handler_is_code_is_an_error(capsys, cli_orders, table):
     table["42"] = new_order()
     cli_orders.start(42)
     code, _, err = run(capsys, *ORDERS, "fire", "order:42", "--agent")
     assert code == EXIT_ERROR
-    assert "pending's step is code that doesn't only read" in err
+    assert "pending's handler is code that doesn't only read" in err
 
 
 def test_agent_and_answer_are_not_given_together(capsys, cli_messages):

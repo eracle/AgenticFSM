@@ -2,8 +2,8 @@
 
 Add ``"agentic_fsm.backends.django"`` to ``INSTALLED_APPS`` and migrate. ``lock`` opens a
 transaction on Django's own connection and takes the entity's current-state row with
-``select_for_update``, so the step's own writes commit with the move. SQLite has no row lock and
-ignores it; there the transaction holds the database once the step writes.
+``select_for_update``, so the handler's own writes commit with the move. SQLite has no row lock and
+ignores it; there the transaction holds the database once the handler writes.
 """
 
 from contextlib import contextmanager

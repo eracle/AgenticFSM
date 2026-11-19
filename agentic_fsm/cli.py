@@ -64,7 +64,7 @@ def _parser() -> argparse.ArgumentParser:
     _add_common(shared, default=argparse.SUPPRESS)  # given after the command, without erasing one given before
     commands = parser.add_subparsers(required=True, metavar="command")
 
-    show = commands.add_parser("show", parents=[shared], help="the states, their steps and the edges")
+    show = commands.add_parser("show", parents=[shared], help="the states, their handlers and the edges")
     show.add_argument("--mermaid", action="store_true", help="as a Mermaid state diagram")
     show.set_defaults(command=show_command)
 
@@ -76,11 +76,11 @@ def _parser() -> argparse.ArgumentParser:
     listing.add_argument("state", help="a state's stored value")
     listing.set_defaults(command=list_command)
 
-    due = commands.add_parser("due", parents=[shared], help="the entities their state's step could move now")
+    due = commands.add_parser("due", parents=[shared], help="the entities their state's handler could move now")
     due.add_argument("--tag", help="only the entities in a state carrying this tag")
     due.set_defaults(command=due_command)
 
-    fire = commands.add_parser("fire", parents=[shared], help="run the step of one entity's state")
+    fire = commands.add_parser("fire", parents=[shared], help="run the handler of one entity's state")
     fire.add_argument("entity", help="<machine>:<id>")
     in_place = fire.add_mutually_exclusive_group()
     in_place.add_argument("--agent", action="store_true", help="print what the model would be given")
@@ -215,7 +215,7 @@ def progress_command(machine: Machine, args) -> Result:
 
 
 def progress_all_command(machine: Machine, args) -> Result:
-    """The moves made; with an entity whose step raised, those moves still print, each failure
+    """The moves made; with an entity whose handler raised, those moves still print, each failure
     goes to stderr, and the exit code is 2."""
     try:
         return _moves_result(machine.progress_all(args.tag, limit=args.limit))
@@ -248,7 +248,7 @@ def _moves_result(moves: list[Move]) -> Result:
 
 
 def _graph_text(graph: Graph) -> str:
-    states = _columns([(s.value, s.kind, s.step or "-", _described(s)) for s in graph.states])
+    states = _columns([(s.value, s.kind, s.handler or "-", _described(s)) for s in graph.states])
     edges = _columns([("from", "to"), *graph.edges])
     return f"{graph.name}\n\n{states}\n\n{edges}"
 

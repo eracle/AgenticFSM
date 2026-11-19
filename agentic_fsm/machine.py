@@ -1,10 +1,10 @@
-"""A machine: a ``States`` class whose states each name their step, one list of ``(from, to)``
+"""A machine: a ``States`` class whose states each name their handler, one list of ``(from, to)``
 edges, and a state backend.
 
     orders = Machine(Order, EDGES, load=get_order)
 
-A state's step is a function of the entity that returns the next state, or ``None`` for "not
-now", or another step to hand over to (a ``Decide`` puts the question to a model). Its allowed
+A state's handler is a function of the entity that returns the next state, or ``None`` for "not
+now", or another handler to hand over to (a ``Decide`` puts the question to a model). Its allowed
 targets are the states its state has an edge to; anything else it returns is a bug, raised as
 ``TransitionError`` with nothing written. Every row in the log is a move that happened.
 """
@@ -20,7 +20,7 @@ from .backends.base.base import AlreadyStarted, BaseStateBackend, Current, Move,
 from .conf import settings
 from .decide import Brief, Decide, Decision, answer_fields
 from .states import States
-from .steps import Step
+from .handlers import Handler
 
 logger = logging.getLogger(__name__)
 
@@ -38,10 +38,10 @@ class TransitionError(Exception):
 
 
 class ProgressError(Exception):
-    """``progress_all`` moved every entity it could, and some entities' steps raised.
+    """``progress_all`` moved every entity it could, and some entities' handlers raised.
 
     ``moves`` are the moves made, each committed; ``failures`` maps each entity that raised to
-    its exception. A failed entity's move, and its step's own writes, were undone.
+    its exception. A failed entity's move, and its handler's own writes, were undone.
     """
 
     def __init__(self, moves: list[Move], failures: dict[str, Exception]):
@@ -66,7 +66,7 @@ class StateInfo:
     kind: str
     description: str
     tags: tuple[str, ...] = ()
-    step: str | None = None  # what the state's step is called; None for a final state
+    handler: str | None = None  # what the state's handler is called; None for a final state
 
 
 @dataclass(frozen=True)
@@ -102,7 +102,7 @@ class Machine:
         self.edges = _expand(states, list(edges))
         self.initial = _the_initial_state(states)
         self._targets = _targets_by_state(self.edges)
-        _check_steps(states)
+        _check_handlers(states)
         _check_finals_have_no_edges(self._targets)
         _check_nothing_stuck(states, self._targets)
         _check_all_reachable(states, self.initial, self._targets)
@@ -115,12 +115,12 @@ class Machine:
     # ── Review ──
 
     def graph(self) -> Graph:
-        """The states with their descriptions and steps, and every edge, in declaration order."""
+        """The states with their descriptions and handlers, and every edge, in declaration order."""
         return Graph(
             name=self.name,
             states=[
                 StateInfo(
-                    s.name, s.value, s.kind, s.description, tuple(sorted(s.tags)), s.step.label if s.step else None
+                    s.name, s.value, s.kind, s.description, tuple(sorted(s.tags)), s.handler.label if s.handler else None
                 )
                 for s in self.states
             ],
@@ -196,18 +196,18 @@ class Machine:
         return moves
 
     def fire(self, entity_id, *, entity=None, answer=None) -> Move | None:
-        """Run the step of the entity's state: the logged move, or ``None`` if it said "not now".
+        """Run the handler of the entity's state: the logged move, or ``None`` if it said "not now".
 
         The entity is locked from the read of its state to the write of the move, so a second
         caller waits and then reads the state this one left. ``entity`` is the entity already in
-        hand, given to the step instead of ``load(id)``: a caller walking its own rows, or one
-        that has set on the entity what it chose for the step.
+        hand, given to the handler instead of ``load(id)``: a caller walking its own rows, or one
+        that has set on the entity what it chose for the handler.
 
         ``answer`` decides in the model's place: a ``Decide``'s fields as a dict or a JSON
         object, or a bare state value. No model is called and the prompt function isn't run.
-        When the state's step is a function that hands over to a ``Decide``, the function runs
+        When the state's handler is a function that hands over to a ``Decide``, the function runs
         first and the answer is taken only if it hands over: one that moves the entity itself,
-        or says "not now", refuses the answer. Only a step that only reads (``@check``) is run
+        or says "not now", refuses the answer. Only a handler that only reads (``@check``) is run
         this way. An answer that is refused, or that the schema or the state's edges don't
         allow, raises ``TransitionError`` with the reason, and nothing is written. A
         ``Decide``'s ``effect`` runs with the decision either way, before the move is written.
@@ -223,7 +223,7 @@ class Machine:
 
         Returns a ``Brief``: the instructions, the prompt, the choices with their descriptions,
         the answer's JSON Schema and the agent's tools. Answer it with ``fire(..., answer=)``.
-        The ``Decide`` is the step of the entity's state, or the one its function hands over
+        The ``Decide`` is the handler of the entity's state, or the one its function hands over
         to, found as ``fire(..., answer=)`` finds it. ``entity`` is as for ``fire``.
         """
         current = self.backend.current(self.name, str(entity_id))
@@ -234,8 +234,8 @@ class Machine:
     def progress(self, entity_id) -> list[Move]:
         """Move one entity until it rests; returns the moves made, oldest first.
 
-        Each round runs the step of the entity's state on the entity loaded afresh, and commits
-        its move. It rests when the step doesn't move it (a final state, or "not now"), and
+        Each round runs the handler of the entity's state on the entity loaded afresh, and commits
+        its move. It rests when the handler doesn't move it (a final state, or "not now"), and
         stops after a move that brings it back to a state this call already left, so it makes
         at most as many moves as there are states.
         """
@@ -251,7 +251,7 @@ class Machine:
         return moves
 
     def progress_all(self, tag: str | None = None, *, limit: int | None = None) -> list[Move]:
-        """Run the step of each non-final entity's state: at most one move per entity per call.
+        """Run the handler of each non-final entity's state: at most one move per entity per call.
 
         Each entity is locked and committed on its own. Returns the moves made.
 
@@ -262,7 +262,7 @@ class Machine:
         that takes a few from its queue each run. An entity that says "not now" or raises
         doesn't count, so one stuck at the head never holds the queue.
 
-        An entity whose step raises doesn't hold the others: its move is undone, the rest are
+        An entity whose handler raises doesn't hold the others: its move is undone, the rest are
         tried, and ``ProgressError`` is raised at the end with the moves made and each failure.
         """
         if limit is not None and limit < 1:
@@ -287,13 +287,13 @@ class Machine:
         return moves
 
     def due(self, tag: str | None = None) -> list[str]:
-        """The unfinished entities their state's step could move now; nothing is moved or written.
+        """The unfinished entities their state's handler could move now; nothing is moved or written.
 
         For a scheduler deciding whether a run is worth starting. Each entity is tried as
-        ``progress_all`` would try it, under its lock: a step that only reads (a ``@check``
-        function) runs and says whether it would move the entity; any other step (an outside
+        ``progress_all`` would try it, under its lock: a handler that only reads (a ``@check``
+        function) runs and says whether it would move the entity; any other handler (an outside
         effect, a ``Decide``) can't be tried without its effect, so an entity is due when its
-        state's step is one, or hands over to one. With ``tag``, only the entities in a state
+        state's handler is one, or hands over to one. With ``tag``, only the entities in a state
         carrying it, as ``progress_all(tag)`` would try. Returns the entity ids, oldest first.
         """
         tagged = self._tagged(tag)
@@ -316,22 +316,22 @@ class Machine:
         return tagged
 
     def _would_move(self, entity_id: str) -> bool:
-        """Under the entity's lock, whether its state's step would move it."""
+        """Under the entity's lock, whether its state's handler would move it."""
         with self.backend.lock(self.name, entity_id) as current:
             state = self._state(current)
             if state.is_final:
                 return False
-            step, entity = state.step, None
-            while step.reads_only:
+            handler, entity = state.handler, None
+            while handler.reads_only:
                 entity = self._entity(current, entity)
-                result = step.run(entity, self._targets[state])
-                if not isinstance(result, Step):
+                result = handler.run(entity, self._targets[state])
+                if not isinstance(result, Handler):
                     return result is not None
-                step = result
+                handler = result
         return True
 
     def _one_move(self, entity_id: str) -> Move | None:
-        """Under the entity's lock, the move its state's step makes, if any."""
+        """Under the entity's lock, the move its state's handler makes, if any."""
         with self.backend.lock(self.name, entity_id) as current:
             state = self._state(current)
             if state.is_final:
@@ -339,15 +339,15 @@ class Machine:
             return self._try(current, state, self.load(current.entity))
 
     def _try(self, current: Current, state: States, entity) -> Move | None:
-        """Run the state's step and each step it hands over to; write the move the last one decides."""
-        step, targets = state.step, self._targets[state]
-        result = step.run(entity, targets)
-        while isinstance(result, Step):
-            step = result
-            result = step.run(entity, targets)
+        """Run the state's handler and each handler it hands over to; write the move the last one decides."""
+        handler, targets = state.handler, self._targets[state]
+        result = handler.run(entity, targets)
+        while isinstance(result, Handler):
+            handler = result
+            result = handler.run(entity, targets)
         if result is None:
             return None
-        return self._apply(current, state, step, result, step.decided_by, entity)
+        return self._apply(current, state, handler, result, handler.decided_by, entity)
 
     def _answer(self, current: Current, state: States, answer, entity) -> Move:
         """Apply an answer given in the model's place; raise with the reason if it can't be."""
@@ -363,38 +363,38 @@ class Machine:
     def _decide_for(self, current: Current, state: States, entity) -> tuple[Decide, object]:
         """The ``Decide`` that decides for the entity in ``state``, and the entity if it was loaded.
 
-        It is the state's step, or the one that step hands over to. A step is run to find out
+        It is the state's handler, or the one that handler hands over to. A handler is run to find out
         only if it only reads; one that settles the move itself leaves nothing to decide.
         """
-        step, subject = state.step, f"{self.name}:{current.entity}"
-        while not isinstance(step, Decide):
-            if not step.reads_only:
+        handler, subject = state.handler, f"{self.name}:{current.entity}"
+        while not isinstance(handler, Decide):
+            if not handler.reads_only:
                 raise TransitionError(
-                    f"{state.value}'s step is code that doesn't only read: no model decides {subject} there"
+                    f"{state.value}'s handler is code that doesn't only read: no model decides {subject} there"
                 )
             entity = self._entity(current, entity)
-            result = step.run(entity, self._targets[state])
+            result = handler.run(entity, self._targets[state])
             if result is None:
-                raise TransitionError(f'{state.value}\'s step says "not now" for {subject}: there is nothing to decide')
-            if not isinstance(result, Step):
+                raise TransitionError(f'{state.value}\'s handler says "not now" for {subject}: there is nothing to decide')
+            if not isinstance(result, Handler):
                 target = result.to if isinstance(result, Decision) else result
                 raise TransitionError(
-                    f"{state.value}'s step moves {subject} to {getattr(target, 'value', target)} itself: "
+                    f"{state.value}'s handler moves {subject} to {getattr(target, 'value', target)} itself: "
                     "there is nothing to decide"
                 )
-            step = result
-        return step, entity
+            handler = result
+        return handler, entity
 
-    def _apply(self, current: Current, state: States, step: Step, result, decided_by: str, entity) -> Move:
-        """Write a step's result as a move; a result outside the state's edges is a bug and raises.
+    def _apply(self, current: Current, state: States, handler: Handler, result, decided_by: str, entity) -> Move:
+        """Write a handler's result as a move; a result outside the state's edges is a bug and raises.
 
-        The step's effect runs here, once the result is allowed and before the move.
+        The handler's effect runs here, once the result is allowed and before the move.
         """
         decided = isinstance(result, Decision)
         target = result.to if decided else result
         self._check_target(state, target)
-        if step.effect is not None:
-            step.effect(entity, result)
+        if handler.effect is not None:
+            handler.effect(entity, result)
         move = self.backend.move(
             Move(
                 machine=self.name,
@@ -411,12 +411,12 @@ class Machine:
     def _check_target(self, state: States, target):
         if not isinstance(target, self.states):
             raise TransitionError(
-                f"{state.value}'s step returned {target!r}, which is not a state of {self.states.__name__}"
+                f"{state.value}'s handler returned {target!r}, which is not a state of {self.states.__name__}"
             )
         if target not in self._targets[state]:
             allowed = ", ".join(t.value for t in self._targets[state])
             raise TransitionError(
-                f"{state.value}'s step returned {target.value}, but {state.value} has edges only to {allowed}"
+                f"{state.value}'s handler returned {target.value}, but {state.value} has edges only to {allowed}"
             )
 
     # ── Lookups ──
@@ -425,7 +425,7 @@ class Machine:
         return self.load(current.entity) if entity is None else entity
 
     def _unfinished_state(self, entity_id, current: Current | None) -> States:
-        """The entity's state, which has a step; raises if it hasn't started or is final."""
+        """The entity's state, which has a handler; raises if it hasn't started or is final."""
         if current is None:
             raise TransitionError(f"{self.name}:{entity_id} hasn't started")
         state = self._state(current)
@@ -485,12 +485,12 @@ def _targets_by_state(edges: list[Edge]) -> dict[States, tuple[States, ...]]:
     return {state: tuple(leads_to) for state, leads_to in targets.items()}
 
 
-def _check_steps(states: type[States]):
+def _check_handlers(states: type[States]):
     for state in states:
-        if state.is_final and state.step is not None:
-            raise MachineError(f"{state.name} is a FinalState but has a step")
-        if not state.is_final and state.step is None:
-            raise MachineError(f"{state.name} has no step; give it one with step= or make it a FinalState")
+        if state.is_final and state.handler is not None:
+            raise MachineError(f"{state.name} is a FinalState but has a handler")
+        if not state.is_final and state.handler is None:
+            raise MachineError(f"{state.name} has no handler; give it one with handler= or make it a FinalState")
 
 
 def _check_finals_have_no_edges(targets: dict[States, tuple[States, ...]]):

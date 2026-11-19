@@ -7,8 +7,8 @@ for the engine on first use. ``create_tables()`` makes the tables
 where they don't exist yet.
 
 ``lock`` opens a transaction and takes the entity's current-state row with ``SELECT ... FOR
-UPDATE``. A step that writes through ``connection()`` writes in that transaction, so its rows
-commit with the move and roll back with it. A lock taken inside another (a step that fires a
+UPDATE``. A handler that writes through ``connection()`` writes in that transaction, so its rows
+commit with the move and roll back with it. A lock taken inside another (a handler that fires a
 second entity) shares the outer transaction through a savepoint. SQLite has no row lock and
 ignores ``FOR UPDATE``; there the transaction holds the database once it writes.
 """
@@ -56,10 +56,10 @@ class StateBackend(BaseStateBackend):
         metadata.create_all(self.engine)
 
     def connection(self) -> Connection:
-        """The connection of the lock this code runs inside, for a step's own writes."""
+        """The connection of the lock this code runs inside, for a handler's own writes."""
         connection = _open.get().get(self.engine)
         if connection is None:
-            raise RuntimeError("connection() is only open inside a lock, i.e. while a step runs")
+            raise RuntimeError("connection() is only open inside a lock, i.e. while a handler runs")
         return connection
 
     # ── Writes ──

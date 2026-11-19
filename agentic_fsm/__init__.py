@@ -13,7 +13,7 @@ from .machine import (
     TransitionError,
 )
 from .states import FinalState, InitialState, State, States
-from .steps import Step, check, is_check
+from .handlers import Handler, check, is_check
 
 __all__ = [
     "AlreadyStarted",
@@ -31,7 +31,7 @@ __all__ = [
     "State",
     "StateInfo",
     "States",
-    "Step",
+    "Handler",
     "TransitionError",
     "check",
     "get_backend",

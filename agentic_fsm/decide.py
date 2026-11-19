@@ -1,4 +1,4 @@
-"""Steps a model or an agent decides: ``Decision`` and ``Decide``.
+"""Handlers a model or an agent decides: ``Decision`` and ``Decide``.
 
     class MessageRead(Decision):
         reason: str
@@ -8,7 +8,7 @@
         schema=MessageRead,
     )
 
-A ``Decide`` is a state's step, or what a state's function hands over to. When it runs, the
+A ``Decide`` is a state's handler, or what a state's function hands over to. When it runs, the
 model is offered only the states the entity's state has an edge to, each with its description.
 A session can stand in for the model: ``machine.brief(...)`` gives it what the model would get,
 and ``machine.fire(..., answer=...)`` applies what it decided.
@@ -24,7 +24,7 @@ from pydantic_ai import Agent
 
 from .conf import settings
 from .states import States
-from .steps import Step
+from .handlers import Handler
 
 
 class Decision(BaseModel):
@@ -38,9 +38,9 @@ class Decision(BaseModel):
 
 @dataclass(frozen=True)
 class Brief:
-    """Everything a session needs to decide a ``Decide`` step in the model's place."""
+    """Everything a session needs to decide a ``Decide`` handler in the model's place."""
 
-    state: str  # the state the entity is in, whose step this is
+    state: str  # the state the entity is in, whose handler this is
     instructions: list[str]
     prompt: str | None  # None: the prompt function said "not now"
     choices: list[tuple[str, str]]  # (state value, description)
@@ -48,8 +48,8 @@ class Brief:
     tools: list[tuple[str, str]]  # (name, description) of the agent's own tools
 
 
-class Decide(Step):
-    """A step decided by a Pydantic AI ``Agent``.
+class Decide(Handler):
+    """A handler decided by a Pydantic AI ``Agent``.
 
     ``prompt`` is a function of the entity; a falsy return means "not now" and no call is made.
     ``agent`` holds the whole model-side definition, and its output type must subclass
@@ -91,7 +91,7 @@ class Decide(Step):
 
     @property
     def decided_by(self) -> str:
-        """Who a move decided by this step's model is logged under: ``llm:<model>``."""
+        """Who a move decided by this handler's model is logged under: ``llm:<model>``."""
         model = self.agent.model
         if model is None or isinstance(model, str):
             return f"llm:{model}"

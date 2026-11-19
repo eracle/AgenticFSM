@@ -1,19 +1,19 @@
 """States, declared like Django model fields and turned into a real enum.
 
     class Order(States):
-        pending   = InitialState("Placed, not paid yet", step=pending)
-        paid      = State("Payment cleared, waiting to ship", step=ship)
+        pending   = InitialState("Placed, not paid yet", handler=pending)
+        paid      = State("Payment cleared, waiting to ship", handler=ship)
         delivered = FinalState("The carrier delivered it")
 
 ``Order`` is a ``str`` enum: ``Order.pending == "pending"``, ``Order("pending") is Order.pending``, and it
 works as a Pydantic field type. Each member keeps its description, its kind, its tags and its
-step.
+handler.
 """
 
 from collections.abc import Iterable
 from enum import Enum, EnumMeta
 
-from .steps import Step, as_step
+from .handlers import Handler, as_handler
 
 INITIAL = "initial"
 PLAIN = "state"
@@ -26,8 +26,8 @@ FINAL = "final"
 class State:
     """A state with its definition. ``value=`` overrides the stored value (default: the name).
 
-    ``step=`` is what decides where an entity goes from the state: a function of the entity,
-    or a ``Step``. Every state but a final one has one.
+    ``handler=`` is what decides where an entity goes from the state: a function of the entity,
+    or a ``Handler``. Every state but a final one has one.
 
     ``tags=`` names the queues the state is: whoever works one tag moves only the entities
     waiting in a state that carries it (``Machine.progress_all(tag=)``, ``Machine.due(tag=)``).
@@ -35,13 +35,13 @@ class State:
 
     kind = PLAIN
 
-    def __init__(self, description: str, *, step=None, value: str | None = None, tags: Iterable[str] = ()):
+    def __init__(self, description: str, *, handler=None, value: str | None = None, tags: Iterable[str] = ()):
         if not isinstance(description, str) or not description.strip():
             raise TypeError(f"{type(self).__name__} needs a description, the state's definition")
         if value is not None and (not isinstance(value, str) or not value):
             raise TypeError(f"value= must be a non-empty string, got {value!r}")
         self.description = description
-        self.step = as_step(step)
+        self.handler = as_handler(handler)
         self.value = value
         self.tags = _tags(tags)
 
@@ -120,9 +120,9 @@ class States(str, Enum, metaclass=_StatesMeta):
         return type(self)._declarations[self.name].description
 
     @property
-    def step(self) -> Step | None:
+    def handler(self) -> Handler | None:
         """What decides where an entity goes from this state; ``None`` if it was given none."""
-        return type(self)._declarations[self.name].step
+        return type(self)._declarations[self.name].handler
 
     @property
     def kind(self) -> str:

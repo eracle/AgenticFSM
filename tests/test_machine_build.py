@@ -23,8 +23,8 @@ def close_or_remove(door):
 
 
 class Door(States):
-    closed = InitialState("Shut", step=open_it)
-    open = State("Open", step=close_or_remove)
+    closed = InitialState("Shut", handler=open_it)
+    open = State("Open", handler=close_or_remove)
     removed = FinalState("Taken off its hinges")
 
 
@@ -41,9 +41,9 @@ def test_a_sound_machine_builds_and_is_named_after_its_states():
     assert build(Order, EDGES, name="purchase").name == "purchase"
 
 
-def test_graph_lists_states_with_their_steps_and_one_pair_per_edge():
+def test_graph_lists_states_with_their_handlers_and_one_pair_per_edge():
     graph = build(Order, EDGES).graph()
-    assert [(s.name, s.kind, s.step) for s in graph.states] == [
+    assert [(s.name, s.kind, s.handler) for s in graph.states] == [
         ("pending", "initial", "await_payment"),
         ("paid", "state", "pack"),
         ("shipped", "state", "await_delivery"),
@@ -65,7 +65,7 @@ def test_graph_lists_states_with_their_steps_and_one_pair_per_edge():
 
 def test_refuses_no_initial_state():
     class NoStart(States):
-        a = State("A", step=open_it)
+        a = State("A", handler=open_it)
         b = FinalState("B")
 
     with pytest.raises(MachineError, match="exactly one InitialState, found none"):
@@ -74,8 +74,8 @@ def test_refuses_no_initial_state():
 
 def test_refuses_two_initial_states():
     class TwoStarts(States):
-        a = InitialState("A", step=open_it)
-        b = InitialState("B", step=open_it)
+        a = InitialState("A", handler=open_it)
+        b = InitialState("B", handler=open_it)
         c = FinalState("C")
 
     with pytest.raises(MachineError, match="exactly one InitialState, found a, b"):
@@ -104,40 +104,40 @@ def test_refuses_something_that_is_not_a_states_class():
         build("Order", [])
 
 
-# ── Steps ──
+# ── Handlers ──
 
 
-def test_refuses_a_state_with_no_step():
+def test_refuses_a_state_with_no_handler():
     class Gate(States):
-        closed = InitialState("Shut", step=open_it)
+        closed = InitialState("Shut", handler=open_it)
         open = State("Open")
         removed = FinalState("Taken off its hinges")
 
-    with pytest.raises(MachineError, match="open has no step; give it one with step= or make it a FinalState"):
+    with pytest.raises(MachineError, match="open has no handler; give it one with handler= or make it a FinalState"):
         build(Gate, [(Gate.closed, Gate.open), (Gate.open, Gate.removed)])
 
 
-def test_refuses_a_final_state_with_a_step():
+def test_refuses_a_final_state_with_a_handler():
     class Gate(States):
-        closed = InitialState("Shut", step=open_it)
-        removed = FinalState("Taken off its hinges", step=open_it)
+        closed = InitialState("Shut", handler=open_it)
+        removed = FinalState("Taken off its hinges", handler=open_it)
 
-    with pytest.raises(MachineError, match="removed is a FinalState but has a step"):
+    with pytest.raises(MachineError, match="removed is a FinalState but has a handler"):
         build(Gate, [(Gate.closed, Gate.removed)])
 
 
-def test_one_step_may_serve_several_states():
+def test_one_handler_may_serve_several_states():
     def leave(gate):
         return Gate.removed
 
     class Gate(States):
-        closed = InitialState("Shut", step=leave)
-        open = State("Open", step=leave)
+        closed = InitialState("Shut", handler=leave)
+        open = State("Open", handler=leave)
         removed = FinalState("Taken off its hinges")
 
     gates = build(Gate, [(Gate.closed, Gate.open), ((Gate.closed, Gate.open), Gate.removed)])
-    assert Gate.closed.step.function is Gate.open.step.function is leave
-    assert gates.graph().states[1].step == "leave"
+    assert Gate.closed.handler.function is Gate.open.handler.function is leave
+    assert gates.graph().states[1].handler == "leave"
 
 
 # ── Edges ──

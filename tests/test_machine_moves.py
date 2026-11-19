@@ -18,7 +18,7 @@ from agentic_fsm import (
     ProgressError,
     State,
     States,
-    Step,
+    Handler,
     TransitionError,
     check,
     get_backend,
@@ -69,7 +69,7 @@ def test_fire_moves_the_entity_and_logs_it(orders, table):
     assert orders.history(1)[-1] == move
 
 
-def test_fire_gives_the_step_the_entity_in_hand_without_loading_it(orders, table):
+def test_fire_gives_the_handler_the_entity_in_hand_without_loading_it(orders, table):
     table["1"] = new_order()
     orders.start(1)
 
@@ -84,7 +84,7 @@ def test_fire_loads_the_entity_when_none_is_given(orders, table):
     assert orders.fire(1) is None
 
 
-def test_a_step_that_returns_none_moves_and_logs_nothing(orders, table):
+def test_a_handler_that_returns_none_moves_and_logs_nothing(orders, table):
     table["1"] = new_order()
     orders.start(1)
 
@@ -94,7 +94,7 @@ def test_a_step_that_returns_none_moves_and_logs_nothing(orders, table):
     assert len(orders.history(1)) == 1
 
 
-def test_a_step_checks_in_the_order_its_body_is_written(orders, table):
+def test_a_handler_checks_in_the_order_its_body_is_written(orders, table):
     table["1"] = new_order(cancel_requested=True, payment_cleared=True)
     orders.start(1)
 
@@ -116,7 +116,7 @@ def test_fire_refuses_an_entity_in_a_final_state(orders, table):
         orders.fire(1)
 
 
-def test_a_step_that_raises_leaves_no_trace(orders):
+def test_a_handler_that_raises_leaves_no_trace(orders):
     orders.start(1)  # no row in the table, so load raises
     with pytest.raises(KeyError):
         orders.fire(1)
@@ -136,7 +136,7 @@ def test_a_state_outside_the_states_edges_raises_and_writes_nothing(backend, tab
     orders.start(1)
 
     with pytest.raises(
-        TransitionError, match="pending's step returned shipped, but pending has edges only to cancelled, paid"
+        TransitionError, match="pending's handler returned shipped, but pending has edges only to cancelled, paid"
     ):
         orders.fire(1)
 
@@ -150,18 +150,18 @@ def test_a_result_that_is_not_a_state_of_the_machine_raises_and_writes_nothing(b
     table["1"] = new_order()
     orders.start(1)
 
-    with pytest.raises(TransitionError, match="pending's step returned .*, which is not a state of Order"):
+    with pytest.raises(TransitionError, match="pending's handler returned .*, which is not a state of Order"):
         orders.fire(1)
 
     assert orders.state_of(1) is orders.states.pending
     assert len(orders.history(1)) == 1
 
 
-# ── A step that hands over ──
+# ── A handler that hands over ──
 
 
-class Carrier(Step):
-    """A step of the caller's own: the carrier's system says whether the parcel left."""
+class Carrier(Handler):
+    """A handler of the caller's own: the carrier's system says whether the parcel left."""
 
     decided_by = "carrier"
 
@@ -183,7 +183,7 @@ def handing_over(backend, table, carrier):
     return orders
 
 
-def test_a_function_may_hand_over_to_another_step_which_decides(backend, table):
+def test_a_function_may_hand_over_to_another_handler_which_decides(backend, table):
     carrier = Carrier()
     orders = handing_over(backend, table, carrier)
     table["1"] = new_order(payment_cleared=True, tracking_number="TRK1")
@@ -196,7 +196,7 @@ def test_a_function_may_hand_over_to_another_step_which_decides(backend, table):
     assert carrier.offered == [(orders.states.cancelled, orders.states.shipped)]
 
 
-def test_a_function_that_settles_the_move_itself_never_runs_the_step_it_could_hand_to(backend, table):
+def test_a_function_that_settles_the_move_itself_never_runs_the_handler_it_could_hand_to(backend, table):
     carrier = Carrier()
     orders = handing_over(backend, table, carrier)
     table["1"] = new_order(payment_cleared=True)
@@ -210,7 +210,7 @@ def test_a_function_that_settles_the_move_itself_never_runs_the_step_it_could_ha
     assert carrier.offered == []
 
 
-def test_a_step_handed_to_may_say_not_now(backend, table):
+def test_a_handler_handed_to_may_say_not_now(backend, table):
     orders = handing_over(backend, table, Carrier())
     table["1"] = new_order(payment_cleared=True)
     orders.start(1)
@@ -220,7 +220,7 @@ def test_a_step_handed_to_may_say_not_now(backend, table):
     assert orders.state_of(1) is orders.states.paid
 
 
-def test_a_state_may_be_given_a_step_object_directly(backend, table):
+def test_a_state_may_be_given_a_handler_object_directly(backend, table):
     orders = order_machine(backend, table, paid=Carrier())
     table["1"] = new_order(payment_cleared=True, tracking_number="TRK1")
     orders.start(1)
@@ -228,7 +228,7 @@ def test_a_state_may_be_given_a_step_object_directly(backend, table):
     assert [(m.to_state, m.decided_by) for m in orders.progress(1)] == [("paid", "code"), ("shipped", "carrier")]
 
 
-def test_a_steps_effect_runs_with_its_result_before_the_move_is_written(backend, table):
+def test_a_handlers_effect_runs_with_its_result_before_the_move_is_written(backend, table):
     seen = []
     carrier = Carrier()
     carrier.effect = lambda order, result: seen.append((order.tracking_number, result, orders.state_of(1)))
@@ -264,12 +264,12 @@ def test_an_effect_that_raises_leaves_nothing_written(backend, table):
 
 
 def test_a_second_fire_waits_for_the_first_and_reads_the_state_it_left(table):
-    """While pending's step runs in one thread, another fires the same order."""
+    """While pending's handler runs in one thread, another fires the same order."""
     backend = get_backend("agentic_fsm.backends.locmem")
-    step_running, may_finish = Event(), Event()
+    handler_running, may_finish = Event(), Event()
 
     def pending(order):
-        step_running.set()
+        handler_running.set()
         may_finish.wait(timeout=5)
         return orders.states.paid
 
@@ -279,7 +279,7 @@ def test_a_second_fire_waits_for_the_first_and_reads_the_state_it_left(table):
 
     first = Thread(target=orders.fire, args=(1,))
     first.start()
-    step_running.wait(timeout=5)
+    handler_running.wait(timeout=5)
     second = Thread(target=orders.fire, args=(1,))
     second.start()
     second.join(timeout=0.2)
@@ -296,11 +296,11 @@ def test_a_second_fire_waits_for_the_first_and_reads_the_state_it_left(table):
     ]
 
 
-def test_a_step_that_raises_rolls_back_what_it_wrote(backend, table):
+def test_a_handler_that_raises_rolls_back_what_it_wrote(backend, table):
     def pending(order):
         if order.cancel_requested:
             return orders.states.cancelled
-        orders.fire(2)  # a write inside the lock, undone with the step
+        orders.fire(2)  # a write inside the lock, undone with the handler
         raise RuntimeError("the payment provider is down")
 
     orders = order_machine(backend, table, pending=pending)
@@ -443,7 +443,7 @@ def test_progress_moves_one_entity_until_it_rests(orders, table):
     assert orders.state_of(2) is Order.pending
 
 
-def test_progress_rests_where_the_step_says_not_now(orders, table):
+def test_progress_rests_where_the_handler_says_not_now(orders, table):
     table["1"] = new_order(payment_cleared=True)
     orders.start(1)
 
@@ -464,7 +464,7 @@ def test_progress_loads_the_entity_afresh_after_each_move(orders, table):
 
 
 def test_progress_stops_when_it_comes_back_to_a_state_it_left(backend, table):
-    def flip(order):  # a step that would bounce the order between two states for ever
+    def flip(order):  # a handler that would bounce the order between two states for ever
         order.flips += 1
         return Shop.paid if order.flips % 2 else Shop.pending
 
@@ -513,8 +513,8 @@ def test_in_state_refuses_another_machines_state(orders):
 # ── due ──
 
 
-def checked_orders(backend, table, **steps):
-    """An order machine whose pending and shipped steps only read, and whose paid step charges."""
+def checked_orders(backend, table, **handlers):
+    """An order machine whose pending and shipped handlers only read, and whose paid handler charges."""
 
     @check
     def pending(order):
@@ -531,7 +531,7 @@ def checked_orders(backend, table, **steps):
     def shipped(order):
         return orders.states.delivered if order.delivered else None
 
-    orders = order_machine(backend, table, **{"pending": pending, "paid": charge_and_ship, "shipped": shipped, **steps})
+    orders = order_machine(backend, table, **{"pending": pending, "paid": charge_and_ship, "shipped": shipped, **handlers})
     return orders
 
 
@@ -547,7 +547,7 @@ def test_due_runs_the_checks_and_moves_nothing(backend, table):
     assert [len(orders.history(order_id)) for order_id in (1, 2, 3)] == [1, 1, 1]
 
 
-def test_an_entity_whose_step_is_not_a_check_is_due_untried(backend, table):
+def test_an_entity_whose_handler_is_not_a_check_is_due_untried(backend, table):
     orders = checked_orders(backend, table)
     table["1"] = new_order(payment_cleared=True)
     orders.start(1)
@@ -557,7 +557,7 @@ def test_an_entity_whose_step_is_not_a_check_is_due_untried(backend, table):
     assert not hasattr(table["1"], "charged")
 
 
-def test_a_check_that_hands_over_to_a_step_that_is_not_one_is_due_without_running_it(backend, table):
+def test_a_check_that_hands_over_to_a_handler_that_is_not_one_is_due_without_running_it(backend, table):
     carrier = Carrier()
 
     @check
@@ -573,7 +573,7 @@ def test_a_check_that_hands_over_to_a_step_that_is_not_one_is_due_without_runnin
     assert carrier.offered == []
 
 
-def test_a_check_that_hands_over_to_a_step_that_only_reads_has_it_run(backend, table):
+def test_a_check_that_hands_over_to_a_handler_that_only_reads_has_it_run(backend, table):
     carrier = Carrier()
     carrier.reads_only = True
 
@@ -623,10 +623,10 @@ def await_delivery(parcel):
 
 
 class Parcel(States):
-    pending = InitialState("Placed, not paid yet", step=await_payment)
-    packing = State("Paid: the warehouse packs it", step=pack, tags={"warehouse"})
-    labelling = State("Packed: the warehouse labels it", step=label, tags={"warehouse", "printer"})
-    shipped = State("Handed to the carrier", step=await_delivery, tags={"carrier"})
+    pending = InitialState("Placed, not paid yet", handler=await_payment)
+    packing = State("Paid: the warehouse packs it", handler=pack, tags={"warehouse"})
+    labelling = State("Packed: the warehouse labels it", handler=label, tags={"warehouse", "printer"})
+    shipped = State("Handed to the carrier", handler=await_delivery, tags={"carrier"})
     delivered = FinalState("The carrier delivered it")
 
 
@@ -710,10 +710,10 @@ def test_a_tag_no_state_carries_is_refused(backend, table, call):
     assert parcels.state_of(2) is Parcel.packing
 
 
-def test_check_marks_a_function_and_refuses_a_step_object():
+def test_check_marks_a_function_and_refuses_a_handler_object():
     assert is_check(await_payment)
     assert not is_check(pack)
-    assert Parcel.pending.step.reads_only
-    assert not Parcel.packing.step.reads_only
+    assert Parcel.pending.handler.reads_only
+    assert not Parcel.packing.handler.reads_only
     with pytest.raises(TypeError, match="can't be a check"):
         check(Decide(prompt=lambda order: "", schema=Decision))

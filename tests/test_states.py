@@ -1,6 +1,6 @@
 import pytest
 
-from agentic_fsm import FinalState, InitialState, State, States, Step
+from agentic_fsm import FinalState, InitialState, State, States, Handler
 
 from .conftest import Order
 
@@ -19,33 +19,33 @@ def test_each_state_keeps_its_description_and_kind():
     assert (Order.pending.kind, Order.paid.kind, Order.cancelled.kind) == ("initial", "state", "final")
 
 
-def test_a_state_keeps_its_step_and_a_function_is_wrapped_into_one():
+def test_a_state_keeps_its_handler_and_a_function_is_wrapped_into_one():
     def shelve(crate):
         return Crate.on_shelf
 
-    class Restock(Step):
+    class Restock(Handler):
         def run(self, entity, targets):
             return None
 
     restock = Restock()
 
     class Crate(States):
-        packed = InitialState("Packed, in the cold room", step=shelve)
-        on_shelf = State("On the shelf", step=restock)
+        packed = InitialState("Packed, in the cold room", handler=shelve)
+        on_shelf = State("On the shelf", handler=restock)
         sold = FinalState("Sold")
 
-    assert isinstance(Crate.packed.step, Step)
-    assert Crate.packed.step.run(object(), ()) is Crate.on_shelf
-    assert Crate.packed.step.label == "shelve"
-    assert Crate.on_shelf.step is restock
-    assert Crate.on_shelf.step.label == "Restock"
-    assert Crate.sold.step is None
+    assert isinstance(Crate.packed.handler, Handler)
+    assert Crate.packed.handler.run(object(), ()) is Crate.on_shelf
+    assert Crate.packed.handler.label == "shelve"
+    assert Crate.on_shelf.handler is restock
+    assert Crate.on_shelf.handler.label == "Restock"
+    assert Crate.sold.handler is None
 
 
-@pytest.mark.parametrize("step", ["shelve", 3, Step])
-def test_a_step_must_be_a_function_or_a_step(step):
-    with pytest.raises(TypeError, match="step= must be a function of the entity or a Step"):
-        State("On the shelf", step=step)
+@pytest.mark.parametrize("handler", ["shelve", 3, Handler])
+def test_a_handler_must_be_a_function_or_a_handler(handler):
+    with pytest.raises(TypeError, match="handler= must be a function of the entity or a Handler"):
+        State("On the shelf", handler=handler)
 
 
 def test_value_overrides_the_stored_value():

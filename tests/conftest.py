@@ -8,10 +8,10 @@ import pytest
 from agentic_fsm import FinalState, InitialState, Machine, State, States, get_backend
 
 
-def order_states(**steps):
-    """The order's states. A test replaces a state's step by naming the state: ``paid=my_step``.
+def order_states(**handlers):
+    """The order's states. A test replaces a state's handler by naming the state: ``paid=my_handler``.
 
-    Each call makes a class of its own, so a replaced step returns the states of the class it
+    Each call makes a class of its own, so a replaced handler returns the states of the class it
     was built into (``orders.states.paid``), not this module's ``Order``.
     """
 
@@ -29,9 +29,9 @@ def order_states(**steps):
         return Order.delivered if order.delivered else None
 
     class Order(States):
-        pending = InitialState("Placed, not paid yet", step=steps.get("pending", await_payment))
-        paid = State("Payment cleared, waiting to ship", step=steps.get("paid", pack))
-        shipped = State("Handed to the carrier", step=steps.get("shipped", await_delivery))
+        pending = InitialState("Placed, not paid yet", handler=handlers.get("pending", await_payment))
+        paid = State("Payment cleared, waiting to ship", handler=handlers.get("paid", pack))
+        shipped = State("Handed to the carrier", handler=handlers.get("shipped", await_delivery))
         delivered = FinalState("The carrier delivered it")
         cancelled = FinalState("Cancelled before it shipped")
 
@@ -54,9 +54,9 @@ Order = order_states()
 EDGES = order_edges(Order)
 
 
-def order_machine(backend, table, **steps):
-    """An order machine on ``backend`` with the given states' steps replaced."""
-    states = order_states(**steps)
+def order_machine(backend, table, **handlers):
+    """An order machine on ``backend`` with the given states' handlers replaced."""
+    states = order_states(**handlers)
     return Machine(states, order_edges(states), load=lambda order_id: table[order_id], backend=backend)
 
 

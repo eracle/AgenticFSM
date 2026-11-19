@@ -1,7 +1,7 @@
 """What every state backend stores and the calls a machine makes on it.
 
 A backend keeps two things: an append-only log of the moves made, and one current-state row per
-entity. A machine reads an entity's row under ``lock``, runs a step, and writes the move inside
+entity. A machine reads an entity's row under ``lock``, runs a handler, and writes the move inside
 that same lock, so a second caller waits and then reads the state the first left. A backend
 stores state, never the entity.
 """

@@ -1,4 +1,4 @@
-"""What only the sqlalchemy backend does: a step's own writes in the move's transaction, the
+"""What only the sqlalchemy backend does: a handler's own writes in the move's transaction, the
 tables Django's models also describe, the ``SQLALCHEMY_URL`` setting, and the row lock on
 Postgres when ``AGENTIC_FSM_TEST_POSTGRES_URL`` names one to test against."""
 
@@ -22,7 +22,7 @@ from .conftest import EDGES, Order, new_order, order_machine, sqlalchemy_backend
 MOVED_AT = datetime(2026, 1, 2, 3, 4, 5, 678901, tzinfo=UTC)
 ON_THE_SECOND = MOVED_AT.replace(microsecond=0)
 
-# The inheritor's own table, which a step writes to.
+# The inheritor's own table, which a handler writes to.
 receipts_metadata = MetaData()
 receipts = Table(
     "receipts",
@@ -33,7 +33,7 @@ receipts = Table(
 
 
 def machine_writing_receipts(backend, table, fail=False):
-    """An order machine whose pending step writes a receipt through the backend's connection."""
+    """An order machine whose pending handler writes a receipt through the backend's connection."""
 
     def pending(order):
         backend.connection().execute(insert(receipts).values(order_id=order.id))
@@ -51,10 +51,10 @@ def receipt_ids(backend):
         return list(connection.execute(select(receipts.c.order_id)).scalars())
 
 
-# ── A step's own writes ──
+# ── A handler's own writes ──
 
 
-def test_a_steps_writes_commit_with_the_move(table):
+def test_a_handlers_writes_commit_with_the_move(table):
     backend = sqlalchemy_backend()
     orders = machine_writing_receipts(backend, table)
     table["1"] = new_order(id="1")
@@ -66,7 +66,7 @@ def test_a_steps_writes_commit_with_the_move(table):
     assert receipt_ids(backend) == ["1"]
 
 
-def test_a_step_that_raises_rolls_back_its_writes_and_the_move(table):
+def test_a_handler_that_raises_rolls_back_its_writes_and_the_move(table):
     backend = sqlalchemy_backend()
     orders = machine_writing_receipts(backend, table, fail=True)
     table["1"] = new_order(id="1")
@@ -243,11 +243,11 @@ def postgres_backend():
 
 
 def test_a_second_fire_waits_for_the_first_on_postgres(postgres_backend, table):
-    """While pending's step runs in one thread, another fires the same order."""
-    step_running, may_finish = Event(), Event()
+    """While pending's handler runs in one thread, another fires the same order."""
+    handler_running, may_finish = Event(), Event()
 
     def pending(order):
-        step_running.set()
+        handler_running.set()
         may_finish.wait(timeout=5)
         return orders.states.paid
 
@@ -257,7 +257,7 @@ def test_a_second_fire_waits_for_the_first_on_postgres(postgres_backend, table):
 
     first = Thread(target=orders.fire, args=(1,))
     first.start()
-    step_running.wait(timeout=5)
+    handler_running.wait(timeout=5)
     second = Thread(target=orders.fire, args=(1,))
     second.start()
     second.join(timeout=0.5)

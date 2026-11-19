@@ -66,7 +66,7 @@ def test_listeners_are_told_in_the_order_they_were_added(orders, table):
     assert calls == ["first", "second"]
 
 
-def test_a_step_that_says_not_now_tells_no_one(orders, table, told):
+def test_a_handler_that_says_not_now_tells_no_one(orders, table, told):
     table["1"] = new_order()
     orders.start(1)
 
@@ -114,7 +114,7 @@ def test_a_listener_is_told_once_the_move_is_committed(orders, table):
 
 
 def two_order_machine(backend, table, after_the_second=lambda: None):
-    """A machine whose pending step on order 1 also pays order 2, inside its own lock."""
+    """A machine whose pending handler on order 1 also pays order 2, inside its own lock."""
     told, told_inside = [], []
 
     def pending(order):
