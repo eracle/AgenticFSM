@@ -32,13 +32,8 @@ by whoever knows something new. A machine is three plain Python things.
   class is a real `str` enum (`Order.paid == "paid"`, usable as a Pydantic type) whose members
   keep their description, kind, tags and handler. The description is required; it's the state's
   definition. `handler=` is the one handler that decides where an entity goes from the state
-  (`States.handler`); a final state has none. `tags=` makes a state a queue: `progress_all(tag)` and `due(tag)` try only the
-  entities in a state carrying the tag, so one worker does one kind of work (`Machine._tagged`;
-  a tag no state carries raises `MachineError`). `agfsm due` and `progress_all` take `--tag`.
-  `progress_all(limit=)` (`--limit`) stops after that many moves, oldest entity first; an
-  entity that doesn't move or raises doesn't count. `due(entities=)` and
-  `progress_all(entities=)` try only those ids, oldest first (`Machine._waiting`), for a
-  caller whose own data says which entities could move.
+  (`States.handler`); a final state has none. `tags=` makes a state a queue (see *Narrowing a
+  run* below).
 - **Handlers** (`handlers.py`): a state has exactly one, and it has no name: the state identifies
   it. `Handler` is the abstract base, with `run(entity, targets)` and three attributes the machine
   reads: `reads_only` (`due` may run it), `decided_by` (who its moves are logged under,
@@ -71,6 +66,16 @@ reachable. Then:
 | `state_of(id)`, `in_state(state)`, `history(id)` | reads |
 | `graph()` | states (each with its handler's `label`) and edges as data |
 | `on_move(listener)` | adds a listener, called with the `Move` after every move and start; returns it, so it decorates |
+
+**Narrowing a run.** `due` and `progress_all` take three narrowings, and the CLI passes the
+first two as `--tag` and `--limit`:
+
+- `tag`: only the entities in a state carrying the tag, so one worker does one kind of work
+  (`Machine._tagged`; a tag no state carries raises `MachineError`).
+- `limit=` (`progress_all` only): stops after that many moves, oldest entity first; an entity
+  that doesn't move or raises doesn't count.
+- `entities=`: only those ids, oldest first (`Machine._waiting`), for a caller whose own data
+  says which entities could move.
 
 **A listener is told once the move is committed.** `start` and `_apply` hand the move to
 `_announce`, which gives the backend's `on_commit` a callback: outside a lock it runs at once,
@@ -204,10 +209,11 @@ Every backend keeps the same two things and the same rule: `move`, called inside
 rewrites the entity's current-state row and appends its log row, and both commit when the lock
 is released.
 
-`0003_no_step_name` dropped the log's `step` column, which named what is now a state's handler. The SQLAlchemy backend's `create_tables()`
-only makes what's missing, so a database it made earlier keeps the column, nullable and unused,
-until whoever owns it drops it. `0002_only_real_moves` deleted the refused log rows and dropped
-`applied`, `reason` and `version`. An app whose migration writes those columns through the historical models declares `run_before = [("agentic_fsm", "0002_only_real_moves")]`.
+The SQLAlchemy backend's `create_tables()` only makes what's missing and never alters a table, so
+a column a Django migration drops from the log (`0003_no_step_name`'s `step`) stays, nullable
+and unused, in a database it made earlier, until whoever owns it drops it. An app whose own
+migration writes the log's dropped `applied`, `reason` or `version` columns through the
+historical models declares `run_before = [("agentic_fsm", "0002_only_real_moves")]`.
 
 ## Tests
 
