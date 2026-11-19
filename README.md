@@ -1,24 +1,104 @@
 # AgenticFSM
 
-Entity lifecycles declared once and advanced the same way by code, a model or an agent.
-
-An order, a ticket or an application sits in a state for days and is moved along by whatever
-knows something new about it. AgenticFSM gives each state one handler that decides where an entity
-goes next, keeps the allowed moves in one list, records every move in an append-only log, and
-raises on a move the list doesn't have.
-
-## Install
+State machines for things that take days: orders, tickets, applications. Each state says who
+decides what happens next (your code, a model, or an agent standing in for the model), every
+move is checked against one list of allowed moves, and every move is logged.
 
 ```bash
-pip install agentic-fsm            # the library; brings Pydantic AI for handlers a model decides
-pip install "agentic-fsm[django]"  # with the Django state backend
-pip install "agentic-fsm[sqlalchemy]"  # with the SQLAlchemy state backend; add your database's driver
+pip install agentic-fsm
 ```
 
-## A machine
+## Why
 
-A handler is a function of the entity. It returns the next state, or `None` for "not now". What it
-checks first is whatever its body checks first.
+An order is placed today, paid tomorrow, shipped next week. In between it sits in a row, and
+the rule for moving it on is spread across a webhook, a cron job and an admin action, each
+writing a `status` column. Nothing says which moves are allowed, and nothing records who made
+the last one.
+
+AgenticFSM puts that in one declaration:
+
+- **Each state names its handler**: the one function that looks at the entity and says where it
+  goes next, or "not now".
+- **One list of edges** says which moves exist. A handler that returns anything else is a bug,
+  and nothing is written.
+- **Every move is a row in a log**: from, to, when, and who decided (`code`, `llm:<model>` or
+  `agent`).
+- **A model can be a handler.** It is offered only the states the edges allow, each with its
+  description, and its answer is logged with the move. A coding agent or a person can answer in
+  its place, with no model key.
+
+The library keeps the state and the log. Your entity stays in your own tables.
+
+## Quick start
+
+A complete, runnable machine, kept in memory:
+
+```python
+from dataclasses import dataclass
+from agentic_fsm import Machine, States, InitialState, State, FinalState
+
+@dataclass
+class OrderRow:
+    paid: bool = False
+    tracking_number: str | None = None
+
+ORDERS = {"42": OrderRow()}            # your own table
+
+
+# A handler reads the entity and returns the next state, or None for "not now".
+def await_payment(order):
+    return Order.paid if order.paid else None
+
+def pack(order):
+    return Order.shipped if order.tracking_number else None
+
+
+# States are declared like Django model fields: a description, and the state's handler.
+class Order(States):
+    pending = InitialState("Placed, not paid yet", handler=await_payment)
+    paid    = State("Payment cleared, waiting to ship", handler=pack)
+    shipped = FinalState("Handed to the carrier")
+
+
+orders = Machine(
+    Order,
+    [(Order.pending, Order.paid), (Order.paid, Order.shipped)],   # the allowed moves
+    load=ORDERS.get,                                              # id -> your entity
+    backend="agentic_fsm.backends.locmem",                        # where state is kept
+)
+
+orders.start(42)
+orders.fire(42)                        # None: not paid, so it stays in pending
+
+ORDERS["42"].paid = True
+orders.fire(42)                        # Move(from_state='pending', to_state='paid', decided_by='code', ...)
+
+ORDERS["42"].tracking_number = "1Z999"
+orders.progress(42)                    # moves it until it rests
+orders.state_of(42)                    # Order.shipped
+orders.history(42)                     # start, pending -> paid, paid -> shipped
+```
+
+In production, swap `locmem` for the Django or SQLAlchemy backend (see
+[State backends](#state-backends)) and call `orders.progress_all()` from a scheduler.
+
+## The pieces
+
+| Piece | What it is |
+|---|---|
+| **State** | A member of a `States` class. Its description is its definition, and it names its handler. Exactly one `InitialState`; a `FinalState` has no handler |
+| **Handler** | A function of the entity (or a `Handler` object, such as a `Decide`). Returns the next state, `None` for "not now", or another handler to hand over to |
+| **Edges** | A list of `(from, to)` pairs. A handler may only return the states its state has an edge to |
+| **Machine** | `Machine(States, edges, load=, backend=)`. Checks the declaration, then starts, fires and progresses entities |
+| **Move** | One log row: `from_state`, `to_state`, `decided_by`, `at`, and the model's `decision` if one decided |
+| **Backend** | Where state and the log are kept: in memory, a Django project's database, or any database SQLAlchemy reaches |
+
+`load(id)` fetches the entity from your own tables. Ids are stored as text, so `load` receives a
+string.
+
+## Declaring a machine
+
+A handler can check several things, in the order its body checks them:
 
 ```python
 def await_payment(order):
@@ -33,13 +113,7 @@ def pack(order):
 
 def await_delivery(order):
     return Order.delivered if order.carrier_status == "delivered" else None
-```
 
-States are declared like Django model fields. Each one carries its definition and its handler: the
-one thing that decides where an entity goes from it. A final state has none.
-
-```python
-from agentic_fsm import States, State, InitialState, FinalState
 
 class Order(States):
     pending   = InitialState("Placed, not paid yet", handler=await_payment)
@@ -47,34 +121,31 @@ class Order(States):
     shipped   = State("Handed to the carrier", handler=await_delivery)
     delivered = FinalState("The carrier delivered it")
     cancelled = FinalState("Cancelled before it shipped")
-```
 
-One list holds the whole graph, one pair per edge. It says which states each state's handler may
-return.
-
-```python
-from agentic_fsm import Machine
 
 EDGES = [
-    # from                         to
-    ((Order.pending, Order.paid),  Order.cancelled),
-    (Order.pending,                Order.paid),
-    (Order.paid,                   Order.shipped),
-    (Order.shipped,                Order.delivered),
+    (Order.pending, Order.paid),
+    (Order.pending, Order.cancelled),
+    (Order.paid,    Order.shipped),
+    (Order.paid,    Order.cancelled),
+    (Order.shipped, Order.delivered),
 ]
 
 orders = Machine(Order, EDGES, load=get_order)
 ```
 
-`load(id)` fetches the entity from your own tables. The library stores the state, never the
-entity. Ids are stored as text, so `load` receives a string.
+An edge's `from` may be a tuple, as shorthand for one edge from each:
+`((Order.pending, Order.paid), Order.cancelled)`.
 
-`Machine(...)` checks the declaration and raises a `MachineError` naming the state or the edge:
-exactly one `InitialState`, every state reachable from it, a handler on every state but a
-`FinalState` and none on those, no edges leaving a `FinalState`, no other state without a way
-out, every edge's states belonging to the machine.
+`Order` is a real `str` enum (`Order.paid == "paid"`), so it can be used as a Pydantic type or a
+database value.
 
-## A handler a model decides
+`Machine(...)` refuses a declaration that can't work, with a `MachineError` naming the state or
+edge: not exactly one `InitialState`, a state that can't be reached from it, a non-final state
+with no handler or no way out, a `FinalState` with a handler or an edge leaving it, an edge to a
+state of another machine.
+
+## Letting a model decide
 
 A `Decide` is a handler that puts the question to a model. It has a prompt function and a schema:
 a `Decision`, which says where the entity goes (`to`), plus any fields you want logged with the
@@ -90,18 +161,13 @@ read_message = Decide(
     prompt=lambda order: order.message and f"Where does this message put the order?\n{order.message}",
     schema=MessageRead,
 )
-
-class Ticket(States):
-    open     = InitialState("The customer wrote, nobody answered", handler=read_message)
-    refunded = FinalState("Money returned")
-    closed   = FinalState("Answered")
 ```
 
 - **The model is offered only the states its state has an edge to**, each with its description,
   so the prompt never has to explain what a state means.
 - **A prompt that returns nothing means "not now"**: no call is made and the entity stays.
 - **The whole `Decision` is logged** with the move, and the move's `decided_by` is
-  `llm:<model>`.
+  `llm:<model>`. The model is the `DECIDE_MODEL` setting (Claude Haiku by default).
 
 For tools, another model, retries or output validators, declare a
 [Pydantic AI](https://ai.pydantic.dev) `Agent` and pass it as `agent=` in place of `schema=`.
@@ -122,12 +188,12 @@ reader = Agent(
 read_message = Decide(agent=reader, prompt=...)
 ```
 
-A function may also return a `Decision` in place of a state, when it decides by rule and wants
-its reason logged.
+A plain function may also return a `Decision` in place of a state, when it decides by rule and
+wants its reason logged.
 
 ### Code first, then the model
 
-A state where facts and a model both have a say is still one handler: a function that moves the
+A state where facts and a model both have a say still has one handler: a function that moves the
 entity on a fact and otherwise hands over, by returning the `Decide`.
 
 ```python
@@ -152,8 +218,10 @@ class Order(States):
 - **The model is offered every state `paid` has an edge to**, `shipped` included. A state's
   description is what tells it which ones only a fact leads to ("Handed to the carrier; set
   when a tracking number arrives").
-- **A function can hand over to any handler**, not only a `Decide`: an object of your own `Handler`
-  subclass, with a `run(entity, targets)` that returns as a function does.
+- **A function can hand over to any handler**, not only a `Decide`: an object of your own
+  `Handler` subclass, with a `run(entity, targets)` that returns as a function does.
+- **`@check` marks a function that only reads.** It lets `due()` try it without side effects,
+  and lets a session answer in the model's place (below).
 
 ### An effect that goes with the decision
 
@@ -203,7 +271,7 @@ so must only read.
 |---|---|
 | `orders.start(42)` | puts an entity in the initial state |
 | `orders.start_all(order_ids)` | starts each of the ids that has no state yet |
-| `orders.fire(42)` | runs the handler of the entity's state |
+| `orders.fire(42)` | runs the handler of the entity's state; returns the `Move`, or `None` for "not now" |
 | `orders.fire(42, entity=order)` | the same, on the order already in hand instead of `load(42)` |
 | `orders.fire(42, answer=...)` | decides in the model's place |
 | `orders.brief(42)` | what a `Decide` would give the model |
@@ -216,32 +284,38 @@ so must only read.
 | `orders.graph()` | the states, their handlers and the edges as data, for review |
 | `orders.on_move(listener)` | calls `listener(move)` after every move, once it's committed |
 
-- **Every row in the log is a move that happened.** A handler's targets are the states its state
-  has an edge to: if `pending`'s handler returns anything but `Order.paid` or `Order.cancelled`,
-  that's a bug, `fire` raises `TransitionError`, and nothing is written. Whatever a handler can
-  meet (a bounce, a failed payment) is a state with its own edge.
-- **`fire` returns the logged `Move`**, or `None` when the handler said "not now". A row's
-  `from_state` says which handler ran, and `decided_by` who decided.
-- **`progress_all` makes at most one move per entity per call.** When to call it is up to you:
-  a cron job, a scheduler, a script. An entity whose handler raises doesn't hold the others: its
-  move is undone, the rest are tried, and `ProgressError` is raised at the end with the moves
-  made (`.moves`) and each entity's exception (`.failures`).
+### What is guaranteed
+
+- **Every row in the log is a move that happened.** If `pending`'s handler returns anything but
+  `Order.paid` or `Order.cancelled`, that's a bug: `fire` raises `TransitionError` and nothing
+  is written. Whatever a handler can meet (a bounce, a failed payment) is a state with its own
+  edge. A row's `from_state` says which handler ran, and `decided_by` who decided.
+- **Two callers can't both move an entity.** `fire` locks the entity from the read of its state
+  to the write of the move; a second caller waits, then reads the state the first left. With
+  the Django and SQLAlchemy backends the handler's own writes commit with the move.
+- **A handler with an outside effect should be safe to run twice.** If it sends an email and the
+  process dies before the move commits, the next call runs it again.
+- **`progress` never loops.** It goes on until the entity rests (a final state, or a handler
+  that says "not now"), loads the entity afresh after each move, commits each move, and stops
+  after a move back to a state it already left.
+
+### Running a machine on a schedule
+
+`progress_all` makes at most one move per entity per call. When to call it is up to you: a cron
+job, a scheduler, a script.
+
+- **One failing entity doesn't hold the others.** Its move is undone, the rest are tried, and
+  `ProgressError` is raised at the end with the moves made (`.moves`) and each entity's
+  exception (`.failures`).
 - **`start_all` is for entities another program makes**: rows a web app inserts, started by
   whoever runs the machine. Hand it every id there is; the ones already started are left alone.
-- **`due` says whether a run is worth starting.** Mark a function that only reads the entity
-  with `@check`; `due` runs it, takes no lock and writes nothing. A handler that isn't a
-  check (it sends an email, or a model decides it) can't be tried without its effect, so an
-  entity is due when its state's handler is one, or when a check hands over to one. When your
-  own data already says which entities could move (a timestamp, a queue), pass their ids as
-  `due(entities=...)` or `progress_all(entities=...)`, and the rest are never loaded.
-
-  ```python
-  from agentic_fsm import check
-
-  @check
-  def await_payment(order):
-      return Order.paid if order.payment_cleared else None
-  ```
+- **`due` says whether a run is worth starting.** It runs each `@check` handler, takes no lock
+  and writes nothing. A handler that isn't a check (it sends an email, or a model decides it)
+  can't be tried without its effect, so an entity is due when its state's handler is one, or
+  when a check hands over to one.
+- **`entities=` skips the rest.** When your own data already says which entities could move (a
+  timestamp, a queue), pass their ids as `due(entities=...)` or `progress_all(entities=...)`,
+  and the others are never loaded.
 - **A tag makes a state a queue.** Give a state `tags=`, and `progress_all(tag)` and `due(tag)`
   try only the entities waiting in a state that carries it. One worker then does one kind of
   work, on its own schedule: the warehouse's run never calls the model, and a slow model never
@@ -250,8 +324,8 @@ so must only read.
 
   ```python
   class Order(States):
-      pending   = InitialState("Placed, not paid yet", handler=await_payment)
-      paid      = State("Payment cleared, waiting to ship", handler=pack, tags={"warehouse"})
+      pending = InitialState("Placed, not paid yet", handler=await_payment)
+      paid    = State("Payment cleared, waiting to ship", handler=pack, tags={"warehouse"})
       ...
 
   orders.progress_all("warehouse")   # only the orders in `paid`
@@ -260,16 +334,8 @@ so must only read.
   one move, oldest entity first, so a worker run every few minutes paces what it does. An
   entity that says "not now" or raises doesn't count, so one stuck at the head never holds
   the others.
-- **`progress` goes on until the entity rests**: a final state, or one whose handler says "not
-  now". It loads the entity afresh after each move, commits each move, and stops after a move
-  that brings the entity back to a state it already left, so it never loops.
-- **Two callers can't both move an entity.** `fire` locks the entity from the read of its state
-  to the write of the move; a second caller waits, then reads the state the first left. With
-  the Django and SQLAlchemy backends the handler's own writes commit with the move.
-- **A handler with an outside effect should be safe to run twice.** If it sends an email and the
-  process dies before the move commits, the next call runs it again.
 
-## When an entity moves
+### When an entity moves
 
 `on_move` adds a listener: a function called with the `Move` after every move the machine
 makes, a start included.
@@ -329,6 +395,8 @@ Where state is kept is a backend. The core imports no database; each backend is 
 chosen by its dotted path, the way Django chooses a database engine.
 
 ```bash
+pip install "agentic-fsm[django]"      # the Django backend
+pip install "agentic-fsm[sqlalchemy]"  # the SQLAlchemy backend; add your database's driver
 export AGENTIC_FSM_BACKEND=agentic_fsm.backends.django
 ```
 
@@ -340,7 +408,12 @@ or `Machine(..., backend="agentic_fsm.backends.django")`. A machine with neither
 | `agentic_fsm.backends.sqlalchemy` | any database SQLAlchemy reaches | `agentic-fsm[sqlalchemy]` and a driver |
 | `agentic_fsm.backends.locmem` | this process's memory, for tests | nothing |
 
-For the Django backend, add its app and migrate:
+Both database backends keep the same two tables: a log (append-only) and one current-state row
+per entity. So they can keep machines in one database and read each other's.
+
+### Django
+
+Add the app and migrate:
 
 ```python
 INSTALLED_APPS = [..., "agentic_fsm.backends.django"]
@@ -349,9 +422,11 @@ INSTALLED_APPS = [..., "agentic_fsm.backends.django"]
 It writes through Django's own connection, so wrapping `fire` in `transaction.atomic()` commits
 your rows and the move together.
 
-The SQLAlchemy backend connects to the `SQLALCHEMY_URL` setting, or takes an engine, or a
-function that makes one (for a machine declared at import whose database is known only when it
-runs; it's called on first use):
+### SQLAlchemy
+
+The backend connects to the `SQLALCHEMY_URL` setting, or takes an engine, or a function that
+makes one (for a machine declared at import whose database is known only when it runs; it's
+called on first use):
 
 ```python
 from agentic_fsm.backends.sqlalchemy.base import StateBackend
@@ -368,11 +443,12 @@ def pack(order):
 orders = Machine(Order, EDGES, load=load_order, backend=backend)
 ```
 
-`backend.connection()`, called while a handler runs, is the connection of the move's transaction:
-what the handler writes through it commits with the move and is undone if the handler raises. Its two
-tables are the Django backend's, so the two backends can keep machines in one database and read
-each other's. `create_tables()` only makes what's missing: a column a later release drops from
+`backend.connection()`, called while a handler runs, is the connection of the move's
+transaction: what the handler writes through it commits with the move and is undone if the
+handler raises. `create_tables()` only makes what's missing: a column a later release drops from
 the log is left in a database made before it, unused, until you drop it.
+
+### Your own
 
 A backend of your own is a package whose `base` module has a `StateBackend` subclassing
 `agentic_fsm.BaseStateBackend`. Its `on_commit(callback)` is what `on_move` rests on: it calls
@@ -406,9 +482,9 @@ uv venv && uv pip install -e ".[dev]"
 pytest
 ```
 
-Set `AGENTIC_FSM_TEST_POSTGRES_URL` (e.g. `postgresql+psycopg://postgres:pg@localhost:5432/postgres`)
-to also test the SQLAlchemy backend's row lock on Postgres; the test drops and recreates the two
-tables there.
+The suite runs on all three backends. Set `AGENTIC_FSM_TEST_POSTGRES_URL` (e.g.
+`postgresql+psycopg://postgres:pg@localhost:5432/postgres`) to also test the SQLAlchemy
+backend's row lock on Postgres; the test drops and recreates the two tables there.
 
 ## Licence
 
