@@ -36,7 +36,9 @@ by whoever knows something new. A machine is three plain Python things.
   entities in a state carrying the tag, so one worker does one kind of work (`Machine._tagged`;
   a tag no state carries raises `MachineError`). `agfsm due` and `progress_all` take `--tag`.
   `progress_all(limit=)` (`--limit`) stops after that many moves, oldest entity first; an
-  entity that doesn't move or raises doesn't count.
+  entity that doesn't move or raises doesn't count. `due(entities=)` and
+  `progress_all(entities=)` try only those ids, oldest first (`Machine._waiting`), for a
+  caller whose own data says which entities could move.
 - **Handlers** (`handlers.py`): a state has exactly one, and it has no name: the state identifies
   it. `Handler` is the abstract base, with `run(entity, targets)` and three attributes the machine
   reads: `reads_only` (`due` may run it), `decided_by` (who its moves are logged under,
@@ -65,7 +67,7 @@ reachable. Then:
 | `brief(id)` | the `Brief` a `Decide` would give the model: state, instructions, prompt, choices, schema, tools |
 | `progress(id)` | moves one entity until it rests: each round runs its state's handler on the entity loaded afresh, and commits its move; it stops when the handler doesn't move it, or after a move back to a state this call already left |
 | `progress_all()` | per unfinished entity, runs its state's handler: at most one move per entity per call, each entity locked and committed on its own. An entity that raises is recorded and the rest tried; then `ProgressError(moves, failures)` |
-| `due()` | the unfinished entities their state's handler could move now, writing nothing: under each entity's lock, a handler that only reads runs (and so does one it hands over to, if that only reads too); any other handler makes the entity due untried (`_would_move`) |
+| `due()` | the unfinished entities their state's handler could move now, writing nothing and taking no lock: a handler that only reads runs (and so does one it hands over to, if that only reads too); any other handler makes the entity due untried (`_would_move`) |
 | `state_of(id)`, `in_state(state)`, `history(id)` | reads |
 | `graph()` | states (each with its handler's `label`) and edges as data |
 | `on_move(listener)` | adds a listener, called with the `Move` after every move and start; returns it, so it decorates |

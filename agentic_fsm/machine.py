@@ -250,7 +250,9 @@ class Machine:
                 break
         return moves
 
-    def progress_all(self, tag: str | None = None, *, limit: int | None = None) -> list[Move]:
+    def progress_all(
+        self, tag: str | None = None, *, limit: int | None = None, entities: Iterable | None = None,
+    ) -> list[Move]:
         """Run the handler of each non-final entity's state: at most one move per entity per call.
 
         Each entity is locked and committed on its own. Returns the moves made.
@@ -262,6 +264,9 @@ class Machine:
         that takes a few from its queue each run. An entity that says "not now" or raises
         doesn't count, so one stuck at the head never holds the queue.
 
+        With ``entities``, only those ids are tried, still oldest first: a caller that can tell
+        from its own data which entities could move spares loading the rest.
+
         An entity whose handler raises doesn't hold the others: its move is undone, the rest are
         tried, and ``ProgressError`` is raised at the end with the moves made and each failure.
         """
@@ -269,7 +274,7 @@ class Machine:
             raise ValueError(f"limit must be at least 1, got {limit!r}")
         tagged = self._tagged(tag)
         moves, failures = [], {}
-        for current in self.backend.all_current(self.name):
+        for current in self._waiting(entities):
             if limit is not None and len(moves) >= limit:
                 break
             try:
@@ -286,24 +291,33 @@ class Machine:
             raise ProgressError(moves, failures)
         return moves
 
-    def due(self, tag: str | None = None) -> list[str]:
+    def due(self, tag: str | None = None, *, entities: Iterable | None = None) -> list[str]:
         """The unfinished entities their state's handler could move now; nothing is moved or written.
 
         For a scheduler deciding whether a run is worth starting. Each entity is tried as
-        ``progress_all`` would try it, under its lock: a handler that only reads (a ``@check``
-        function) runs and says whether it would move the entity; any other handler (an outside
-        effect, a ``Decide``) can't be tried without its effect, so an entity is due when its
-        state's handler is one, or hands over to one. With ``tag``, only the entities in a state
-        carrying it, as ``progress_all(tag)`` would try. Returns the entity ids, oldest first.
+        ``progress_all`` would try it, but read without its lock, since nothing is written: a
+        handler that only reads (a ``@check`` function) runs and says whether it would move the
+        entity; any other handler (an outside effect, a ``Decide``) can't be tried without its
+        effect, so an entity is due when its state's handler is one, or hands over to one. With
+        ``tag``, only the entities in a state carrying it, as ``progress_all(tag)`` would try;
+        with ``entities``, only those ids. Returns the entity ids, oldest first.
         """
         tagged = self._tagged(tag)
         return [
             current.entity
-            for current in self.backend.all_current(self.name)
+            for current in self._waiting(entities)
             if not (state := self._state(current)).is_final
             and (tagged is None or state in tagged)
-            and self._would_move(current.entity)
+            and self._would_move(current, state)
         ]
+
+    def _waiting(self, entities: Iterable | None) -> list[Current]:
+        """Every entity's current state, oldest first; only those of ``entities`` when given."""
+        everyone = self.backend.all_current(self.name)
+        if entities is None:
+            return everyone
+        wanted = {str(entity_id) for entity_id in entities}
+        return [current for current in everyone if current.entity in wanted]
 
     def _tagged(self, tag: str | None) -> set[States] | None:
         """The states carrying ``tag``; ``None`` for no tag, which is every state."""
@@ -315,19 +329,20 @@ class Machine:
             raise MachineError(f"no state of {self.name} is tagged {tag!r}; its tags are {known}")
         return tagged
 
-    def _would_move(self, entity_id: str) -> bool:
-        """Under the entity's lock, whether its state's handler would move it."""
-        with self.backend.lock(self.name, entity_id) as current:
-            state = self._state(current)
-            if state.is_final:
-                return False
-            handler, entity = state.handler, None
-            while handler.reads_only:
-                entity = self._entity(current, entity)
-                result = handler.run(entity, self._targets[state])
-                if not isinstance(result, Handler):
-                    return result is not None
-                handler = result
+    def _would_move(self, current: Current, state: States) -> bool:
+        """Whether the handler of ``state`` would move the entity, run with no lock taken.
+
+        Only handlers that only read are run, so nothing is written, and the answer is a hint:
+        a move made meanwhile is seen by the next call, and ``fire`` reads the state again
+        under the lock.
+        """
+        handler, entity = state.handler, None
+        while handler.reads_only:
+            entity = self._entity(current, entity)
+            result = handler.run(entity, self._targets[state])
+            if not isinstance(result, Handler):
+                return result is not None
+            handler = result
         return True
 
     def _one_move(self, entity_id: str) -> Move | None:

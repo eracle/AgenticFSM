@@ -229,9 +229,11 @@ so must only read.
 - **`start_all` is for entities another program makes**: rows a web app inserts, started by
   whoever runs the machine. Hand it every id there is; the ones already started are left alone.
 - **`due` says whether a run is worth starting.** Mark a function that only reads the entity
-  with `@check`; `due` runs it, under the entity's lock, and writes nothing. A handler that isn't a
+  with `@check`; `due` runs it, takes no lock and writes nothing. A handler that isn't a
   check (it sends an email, or a model decides it) can't be tried without its effect, so an
-  entity is due when its state's handler is one, or when a check hands over to one.
+  entity is due when its state's handler is one, or when a check hands over to one. When your
+  own data already says which entities could move (a timestamp, a queue), pass their ids as
+  `due(entities=...)` or `progress_all(entities=...)`, and the rest are never loaded.
 
   ```python
   from agentic_fsm import check

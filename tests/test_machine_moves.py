@@ -591,6 +591,19 @@ def test_a_check_that_hands_over_to_a_handler_that_only_reads_has_it_run(backend
     assert orders.in_state(orders.states.paid) == ["1", "2"]
 
 
+def test_due_takes_no_lock(backend, table, monkeypatch):
+    orders = checked_orders(backend, table)
+    table["1"], table["2"] = new_order(payment_cleared=True), new_order()
+    orders.start_all([1, 2])
+
+    def no_lock(machine, entity):
+        raise AssertionError(f"due locked {machine}:{entity}")
+
+    monkeypatch.setattr(orders.backend, "lock", no_lock)
+
+    assert orders.due() == ["1"]
+
+
 def test_a_finished_entity_is_never_due_nor_loaded(backend, table):
     orders = checked_orders(backend, table)
     table["1"] = new_order(cancel_requested=True)
@@ -680,6 +693,23 @@ def test_a_limit_stops_progress_all_after_that_many_moves_oldest_first(backend, 
     assert [m.entity for m in parcels.progress_all("warehouse", limit=1)] == ["2"]
     assert parcels.state_of(3) is Parcel.labelling
     assert [m.entity for m in parcels.progress_all(limit=2)] == ["1", "2"]
+
+
+def test_entities_narrow_due_and_progress_all_to_those_ids_and_never_load_the_rest(backend, table):
+    parcels = parcels_in_every_state(backend, table)
+    del table["1"]  # loading it now would raise
+
+    assert parcels.due(entities=[3, "2", "99"]) == ["2", "3"]
+    assert parcels.due("warehouse", entities=["3", "4"]) == ["3"]
+    assert [m.entity for m in parcels.progress_all(entities=["4", "2"])] == ["2", "4"]
+    assert parcels.state_of(3) is Parcel.labelling
+
+
+def test_no_entities_given_tries_none(backend, table):
+    parcels = parcels_in_every_state(backend, table)
+
+    assert parcels.due(entities=[]) == []
+    assert parcels.progress_all(entities=[]) == []
 
 
 def test_an_entity_that_does_not_move_does_not_count_toward_the_limit(backend, table):
